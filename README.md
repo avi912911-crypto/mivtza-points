@@ -11,22 +11,22 @@ npm install
 npm start
 ```
 
-האתר עולה בכתובת http://localhost:3000. כניסה ראשונה: `admin` עם הסיסמה שב-`ADMIN_PASSWORD` (אם לא הוגדרה, נוצרת סיסמה אקראית שמודפסת ביומן השרת). המערכת מבקשת מיד סיסמה חדשה.
+האתר עולה בכתובת http://localhost:3000. בכניסה הראשונה המערכת מבקשת ליצור חשבון מנהל (או שהוא נוצר מראש מ-`ADMIN_PASSWORD`).
 
 ## הגדרות סביבה
 
 | משתנה | משמעות | ברירת מחדל |
 | --- | --- | --- |
 | `PORT` | פורט השרת | 3000 |
-| `DATA_DIR` | תיקיית מסד הנתונים והגיבויים | `./data` |
-| `ADMIN_USERNAME` / `ADMIN_PASSWORD` | משתמש המנהל שנוצר בהפעלה הראשונה | `admin` / סיסמה אקראית ביומן |
+| `DATA_DIR` | תיקיית מסד הנתונים והגיבויים | תיקיית ה-Volume של Railway, אחרת `./data` |
+| `ADMIN_USERNAME` / `ADMIN_PASSWORD` | יצירת משתמש מנהל מראש (לא חובה) | ללא: המבקר הראשון יוצר את המנהל |
 
 ## העלאה ל-Railway
 
 1. מחברים את מאגר ה-GitHub לפרויקט חדש ב-Railway (New Project → Deploy from GitHub repo).
-2. מוסיפים Volume לשירות, עם נקודת עגינה `/data`.
-3. מגדירים משתנה סביבה `DATA_DIR=/data` ו-`ADMIN_PASSWORD` לסיסמה ראשונית.
-4. ב-Settings → Networking לוחצים Generate Domain כדי לקבל כתובת.
+2. מוסיפים Volume לשירות (נקודת עגינה `/data`). המערכת מזהה אותו לבד.
+3. ב-Settings → Networking לוחצים Generate Domain כדי לקבל כתובת.
+4. נכנסים לכתובת ויוצרים את חשבון המנהל.
 
 ## מבנה
 

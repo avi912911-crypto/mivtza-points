@@ -94,21 +94,23 @@ function openDialog(title, bodyHtml, onSubmit, submitLabel = 'שמירה') {
 
 async function renderLogin() {
   try { state.settings = { ...(state.settings || {}), ...(await api('/api/public')) }; } catch {}
+  const setup = !!state.settings?.needs_setup;
   $app.innerHTML = `<div class="login-wrap"><div class="card login-card">
     ${logoHtml()}
     <h1>${esc(state.settings?.program_name || 'מבצע')}</h1>
-    <p class="sub">מערכת עדכון נקודות</p>
+    <p class="sub">${setup ? 'הגדרה ראשונה: צור את חשבון המנהל' : 'מערכת עדכון נקודות'}</p>
     <form id="login">
-      <label class="field">שם משתמש<input type="text" name="username" autocomplete="username" required></label>
-      <label class="field">סיסמה<input type="password" name="password" autocomplete="current-password" required></label>
+      ${setup ? '<label class="field">השם שלך<input type="text" name="display_name" required></label>' : ''}
+      <label class="field">שם משתמש${setup ? ' (באנגלית)' : ''}<input type="text" name="username" dir="ltr" autocomplete="username" required></label>
+      <label class="field">סיסמה${setup ? ' (לפחות 6 תווים)' : ''}<input type="password" name="password" minlength="${setup ? 6 : 1}" autocomplete="${setup ? 'new-password' : 'current-password'}" required></label>
       <div class="error"></div>
-      <button class="btn">כניסה</button>
+      <button class="btn">${setup ? 'יצירת חשבון וכניסה' : 'כניסה'}</button>
     </form></div></div>`;
   const form = document.getElementById('login');
   form.addEventListener('submit', async e => {
     e.preventDefault();
     try {
-      await api('/api/login', { body: Object.fromEntries(new FormData(form)) });
+      await api(setup ? '/api/setup' : '/api/login', { body: Object.fromEntries(new FormData(form)) });
       await boot();
     } catch (err) {
       form.querySelector('.error').textContent = err.message;

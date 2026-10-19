@@ -106,20 +106,40 @@ function publicUser(u) {
            can_office: !!u.can_office, must_change: !!u.must_change };
 }
 
+const needsSetup = () => db.prepare('SELECT COUNT(*) AS n FROM users').get().n === 0;
+
 app.get('/api/public', wrap(() => {
   const s = getSettings();
-  return { program_name: s.program_name, logo: s.logo };
+  return { program_name: s.program_name, logo: s.logo, needs_setup: needsSetup() };
+}));
+
+function startSession(req, res, user) {
+  const token = crypto.randomBytes(32).toString('hex');
+  db.prepare('INSERT INTO sessions (token, user_id, expires) VALUES (?, ?, ?)')
+    .run(token, user.id, Date.now() + SESSION_DAYS * 86400000);
+  db.prepare('DELETE FROM sessions WHERE expires < ?').run(Date.now());
+  res.setHeader('Set-Cookie', `sid=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${SESSION_DAYS * 86400}${req.secure ? '; Secure' : ''}`);
+}
+
+// First run only: creates the admin account while the system has no users.
+app.post('/api/setup', wrap((req, res) => {
+  if (!needsSetup()) fail(403, 'המערכת כבר הוגדרה');
+  const { username, display_name, password } = req.body || {};
+  if (!username || !password) fail(400, 'יש למלא שם משתמש וסיסמה');
+  if (String(password).length < 6) fail(400, 'הסיסמה צריכה להיות לפחות 6 תווים');
+  const id = db.prepare(`INSERT INTO users (username, password_hash, display_name, role, can_office)
+                         VALUES (?, ?, ?, 'admin', 1)`)
+    .run(String(username).trim(), hashPassword(String(password)), String(display_name || 'מנהל').trim()).lastInsertRowid;
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
+  startSession(req, res, user);
+  return { user: publicUser(user) };
 }));
 
 app.post('/api/login', wrap((req, res) => {
   const { username, password } = req.body || {};
   const user = db.prepare('SELECT * FROM users WHERE username = ? AND active = 1').get(String(username || '').trim());
   if (!user || !checkPassword(String(password || ''), user.password_hash)) fail(401, 'שם משתמש או סיסמה שגויים');
-  const token = crypto.randomBytes(32).toString('hex');
-  db.prepare('INSERT INTO sessions (token, user_id, expires) VALUES (?, ?, ?)')
-    .run(token, user.id, Date.now() + SESSION_DAYS * 86400000);
-  db.prepare('DELETE FROM sessions WHERE expires < ?').run(Date.now());
-  res.setHeader('Set-Cookie', `sid=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${SESSION_DAYS * 86400}${req.secure ? '; Secure' : ''}`);
+  startSession(req, res, user);
   return { user: publicUser(user) };
 }));
 

@@ -3,7 +3,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { DatabaseSync } = require('node:sqlite');
 
-const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
+const DATA_DIR = process.env.DATA_DIR || process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data');
 fs.mkdirSync(DATA_DIR, { recursive: true });
 const DB_PATH = path.join(DATA_DIR, 'mivtza.db');
 
@@ -146,16 +146,11 @@ function seed() {
       ins.run(name, kind, shift, points, days ?? '0,1,2,3,4', i));
   }
 
-  if (db.prepare('SELECT COUNT(*) AS n FROM users').get().n === 0) {
-    const username = process.env.ADMIN_USERNAME || 'admin';
-    // No fixed default: the code is public, so an unset password gets a random one printed to the log.
-    let password = process.env.ADMIN_PASSWORD;
-    if (!password) {
-      password = crypto.randomBytes(6).toString('hex');
-      console.log(`Initial admin login: ${username} / ${password}`);
-    }
+  // Without ADMIN_PASSWORD the first visitor to the site creates the admin account (see /api/setup).
+  if (process.env.ADMIN_PASSWORD && db.prepare('SELECT COUNT(*) AS n FROM users').get().n === 0) {
     db.prepare(`INSERT INTO users (username, password_hash, display_name, role, can_office, must_change)
-                VALUES (?, ?, 'מנהל', 'admin', 1, 1)`).run(username, hashPassword(password));
+                VALUES (?, ?, 'מנהל', 'admin', 1, 1)`)
+      .run(process.env.ADMIN_USERNAME || 'admin', hashPassword(process.env.ADMIN_PASSWORD));
   }
 }
 seed();
