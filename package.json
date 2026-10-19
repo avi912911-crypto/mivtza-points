@@ -1,0 +1,16 @@
+{
+  "name": "mivtza-points",
+  "version": "1.0.0",
+  "private": true,
+  "description": "מערכת עדכון נקודות למבצע",
+  "main": "server.js",
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning server.js"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}
