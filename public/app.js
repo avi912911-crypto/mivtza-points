@@ -139,6 +139,9 @@ function shell(content) {
       <div class="userbox"><span>${esc(state.me.display_name)} · ${ROLE[state.me.role]}</span>
         <button id="pw">סיסמה</button><button id="logout">יציאה</button></div>
     </header>
+    ${state.settings.storage_temporary && state.me.role !== 'teacher' ? `<div class="storage-warning">
+      שים לב: לשרת לא מחובר אחסון קבוע (Volume) ב-Railway, ולכן כל הנתונים יימחקו בעדכון הבא של האתר.
+      יש לחבר Volume לשירות לפני שממשיכים להזין נתונים.</div>` : ''}
     <main id="main">${content}</main>`;
   document.getElementById('menu').onclick = () => document.getElementById('nav').classList.toggle('open');
   document.getElementById('logout').onclick = async () => { await api('/api/logout', { body: {} }); state.me = null; renderLogin(); };

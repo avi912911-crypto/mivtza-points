@@ -3,7 +3,10 @@ const path = require('path');
 const crypto = require('crypto');
 const { DatabaseSync } = require('node:sqlite');
 
-const DATA_DIR = process.env.DATA_DIR || process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data');
+// On Railway only an attached Volume survives a redeploy, so its mount path wins over everything else.
+const DATA_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH || process.env.DATA_DIR || path.join(__dirname, 'data');
+const STORAGE_TEMPORARY = !!(process.env.RAILWAY_PROJECT_ID || process.env.RAILWAY_ENVIRONMENT_NAME)
+  && !process.env.RAILWAY_VOLUME_MOUNT_PATH;
 fs.mkdirSync(DATA_DIR, { recursive: true });
 const DB_PATH = path.join(DATA_DIR, 'mivtza.db');
 
@@ -190,4 +193,4 @@ function backup() {
   return file;
 }
 
-module.exports = { db, DB_PATH, hashPassword, checkPassword, getSettings, backup };
+module.exports = { db, DB_PATH, STORAGE_TEMPORARY, hashPassword, checkPassword, getSettings, backup };

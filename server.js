@@ -2,7 +2,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const express = require('express');
-const { db, DB_PATH, hashPassword, checkPassword, getSettings, backup } = require('./db');
+const { db, DB_PATH, STORAGE_TEMPORARY, hashPassword, checkPassword, getSettings, backup } = require('./db');
 
 const app = express();
 app.set('trust proxy', 1);
@@ -110,7 +110,7 @@ const needsSetup = () => db.prepare('SELECT COUNT(*) AS n FROM users').get().n =
 
 app.get('/api/public', wrap(() => {
   const s = getSettings();
-  return { program_name: s.program_name, logo: s.logo, needs_setup: needsSetup() };
+  return { program_name: s.program_name, logo: s.logo, needs_setup: needsSetup(), storage_temporary: STORAGE_TEMPORARY };
 }));
 
 function startSession(req, res, user) {
