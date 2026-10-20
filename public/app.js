@@ -185,7 +185,8 @@ async function boot() {
     const me = await api('/api/me');
     Object.assign(state, { me: me.user, settings: me.settings, today: me.today });
   } catch { return; }
-  if (!location.hash) location.hash = state.me.role === 'teacher' ? '#/entry' : '#/dashboard';
+  // Every login or reopening of the site starts on the dashboard, not the last page visited.
+  history.replaceState(null, '', '#/dashboard');
   await route();
   if (state.me.must_change) changePassword(true);
 }
