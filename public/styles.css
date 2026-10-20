@@ -171,6 +171,7 @@ th.name { background: var(--surface-2); z-index: 2; }
 .empty { text-align: center; color: var(--muted); padding: 30px; }
 .logo-preview { max-height: 90px; max-width: 200px; border-radius: 10px; border: 1px solid var(--border); padding: 6px; background: #fff; }
 .muted { color: var(--muted); }
+.muted.small { font-size: 12px; font-weight: 400; }
 dialog { border: 0; border-radius: var(--radius); box-shadow: 0 20px 60px rgba(0,0,0,.25); padding: 24px; width: min(460px, 92vw); direction: rtl; }
 dialog::backdrop { background: rgba(28,35,64,.35); }
 dialog form { display: flex; flex-direction: column; gap: 12px; }
@@ -194,6 +195,8 @@ dialog .actions { display: flex; gap: 8px; justify-content: flex-start; margin-t
 /* solid fill: the PDF renderer fails on gradients of zero width */
 .report-doc .progress > div { background: var(--primary); }
 .pct span { min-width: 34px; font-size: 13px; }
+.blank-table td { height: 30px; }
+.blank-table .blank-col { min-width: 110px; border-inline-start: 1px solid var(--border); }
 .report-foot { margin-top: 12px; font-size: 12px; }
 
 @media print {

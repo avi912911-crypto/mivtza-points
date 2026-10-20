@@ -116,6 +116,10 @@ if (addColumn('students', 'morning_class_id', 'INTEGER REFERENCES classes(id) ON
   db.exec('ALTER TABLE students ADD COLUMN afternoon_class_id INTEGER REFERENCES classes(id) ON DELETE SET NULL');
   db.exec('UPDATE students SET morning_class_id = class_id');
 }
+// v3: items entered by the secretary on one list of all students (e.g. the Tuesday talk)
+if (addColumn('items', 'general', 'INTEGER NOT NULL DEFAULT 0')) {
+  db.exec(`UPDATE items SET general = 1, shift = 'office' WHERE name = 'שיחה יום ג''' OR name LIKE 'שיחה%'`);
+}
 
 function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString('hex');

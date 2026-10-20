@@ -255,19 +255,23 @@ function entryContext(req, classId, date) {
 
   const key = weekStart(date);
   const lastDay = addDays(key, 6);
-  const daysOff = new Set(db.prepare('SELECT date FROM days_off WHERE date BETWEEN ? AND ?').all(key, lastDay).map(d => d.date));
-  const items = db.prepare('SELECT * FROM items WHERE active = 1 ORDER BY sort, id').all()
-    .filter(it => shifts.includes(it.shift))
-    .map(it => ({ ...it, max: it.kind === 'daily' ? maxCount(it, key, daysOff) : it.kind === 'weekly' ? 1 : 100 }))
-    .filter(it => it.max > 0);
+  const daysOff = weekDaysOff(key);
+  const items = weekItems(key, daysOff).filter(it => !it.general && shifts.includes(it.shift));
   return { cls, items, key, lastDay, daysOff };
 }
 
-app.get('/api/entry', wrap(req => {
-  const { class_id, date } = req.query;
-  const { cls, items, key, lastDay, daysOff } = entryContext(req, class_id, date);
-  const students = db.prepare(`SELECT id, first_name, last_name FROM students
-                               WHERE ${groupColumn(cls)} = ? AND active = 1 ORDER BY last_name, first_name`).all(cls.id);
+// Active items with the most a student can get in the given week
+function weekItems(key, daysOff) {
+  return db.prepare('SELECT * FROM items WHERE active = 1 ORDER BY sort, id').all()
+    .map(it => ({ ...it, max: it.kind === 'daily' ? maxCount(it, key, daysOff) : it.kind === 'weekly' ? 1 : 100 }))
+    .filter(it => it.max > 0);
+}
+
+function weekDaysOff(key) {
+  return new Set(db.prepare('SELECT date FROM days_off WHERE date BETWEEN ? AND ?').all(key, addDays(key, 6)).map(d => d.date));
+}
+
+function readValues(key, items, students) {
   const values = {};
   if (items.length && students.length) {
     const rows = db.prepare(`SELECT student_id, item_id, value FROM entries
@@ -276,6 +280,44 @@ app.get('/api/entry', wrap(req => {
       .all(key, ...items.map(i => i.id), ...students.map(s => s.id));
     for (const r of rows) values[`${r.student_id}:${r.item_id}`] = r.value;
   }
+  return values;
+}
+
+function saveChanges(user, items, studentIds, key, changes) {
+  if (!Array.isArray(changes)) fail(400, 'נתונים חסרים');
+  const allowedItems = new Map(items.map(i => [i.id, i]));
+  const upsert = db.prepare(`INSERT INTO entries (student_id, item_id, date, value, updated_by, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (student_id, item_id, date)
+    DO UPDATE SET value = excluded.value, updated_by = excluded.updated_by, updated_at = excluded.updated_at`);
+  const del = db.prepare('DELETE FROM entries WHERE student_id = ? AND item_id = ? AND date = ?');
+  const now = new Date().toISOString();
+  db.exec('BEGIN');
+  try {
+    for (const c of changes) {
+      const item = allowedItems.get(Number(c.item_id));
+      if (!item || !studentIds.has(Number(c.student_id))) fail(400, 'שינוי לא מורשה');
+      if (c.value === null || c.value === '' || c.value === 0 && item.kind !== 'exam') {
+        del.run(c.student_id, item.id, key);
+      } else {
+        const v = Number(c.value);
+        const min = item.kind === 'exam' ? 0 : 1;
+        if (!Number.isInteger(v) || v < min || v > item.max) fail(400, `ערך לא תקין ב${item.name}`);
+        upsert.run(c.student_id, item.id, key, v, user.id, now);
+      }
+    }
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+}
+
+app.get('/api/entry', wrap(req => {
+  const { class_id, date } = req.query;
+  const { cls, items, key, lastDay, daysOff } = entryContext(req, class_id, date);
+  const students = db.prepare(`SELECT id, first_name, last_name FROM students
+                               WHERE ${groupColumn(cls)} = ? AND active = 1 ORDER BY last_name, first_name`).all(cls.id);
+  const values = readValues(key, items, students);
   return {
     class: { id: cls.id, name: cls.name, shift: cls.shift },
     items, students, values,
@@ -292,36 +334,49 @@ app.post('/api/entry', wrap(req => {
   const { cls, items, key, lastDay } = entryContext(req, class_id, date);
   if (isLocked(req.user, lastDay)) fail(403, 'הזמן לעדכון השבוע הזה עבר. פנה למזכיר.');
   if (key > today()) fail(400, 'אי אפשר להזין שבוע עתידי');
-  if (!Array.isArray(changes)) fail(400, 'נתונים חסרים');
-
-  const allowedItems = new Map(items.map(i => [i.id, i]));
   const studentIds = new Set(db.prepare(`SELECT id FROM students WHERE ${groupColumn(cls)} = ?`).all(cls.id).map(s => s.id));
-  const upsert = db.prepare(`INSERT INTO entries (student_id, item_id, date, value, updated_by, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (student_id, item_id, date)
-    DO UPDATE SET value = excluded.value, updated_by = excluded.updated_by, updated_at = excluded.updated_at`);
-  const del = db.prepare('DELETE FROM entries WHERE student_id = ? AND item_id = ? AND date = ?');
-  const now = new Date().toISOString();
-
-  db.exec('BEGIN');
-  try {
-    for (const c of changes) {
-      const item = allowedItems.get(Number(c.item_id));
-      if (!item || !studentIds.has(Number(c.student_id))) fail(400, 'שינוי לא מורשה');
-      if (c.value === null || c.value === '' || c.value === 0 && item.kind !== 'exam') {
-        del.run(c.student_id, item.id, key);
-      } else {
-        const v = Number(c.value);
-        const min = item.kind === 'exam' ? 0 : 1;
-        if (!Number.isInteger(v) || v < min || v > item.max) fail(400, `ערך לא תקין ב${item.name}`);
-        upsert.run(c.student_id, item.id, key, v, req.user.id, now);
-      }
-    }
-    db.exec('COMMIT');
-  } catch (e) {
-    db.exec('ROLLBACK');
-    throw e;
-  }
+  saveChanges(req.user, items, studentIds, key, changes);
   audit(req.user.id, 'entry', { class: cls.name, week: key, count: changes.length });
+  return { ok: true };
+}));
+
+// ---------- general list (secretary): all students A-Z ----------
+
+const staffOnly = user => { if (user.role === 'teacher') fail(403, 'רק למזכיר ולמנהל'); };
+const hebSort = (a, b) => a.name.localeCompare(b.name, 'he');
+
+function generalContext(date) {
+  if (!isDate(date)) fail(400, 'תאריך לא תקין');
+  const key = weekStart(date);
+  const daysOff = weekDaysOff(key);
+  const items = weekItems(key, daysOff).filter(it => it.general);
+  const names = new Map(db.prepare('SELECT id, name FROM classes').all().map(c => [c.id, c.name]));
+  const students = db.prepare('SELECT * FROM students WHERE active = 1').all().map(s => ({
+    id: s.id, first_name: s.first_name, last_name: s.last_name,
+    name: `${s.first_name} ${s.last_name}`.trim(),
+    morning: names.get(s.morning_class_id) || '', afternoon: names.get(s.afternoon_class_id) || '',
+  })).sort(hebSort);
+  return { key, daysOff, items, students };
+}
+
+app.get('/api/general', wrap(req => {
+  staffOnly(req.user);
+  const { key, daysOff, items, students } = generalContext(req.query.date);
+  return {
+    items, students, values: readValues(key, items, students),
+    locked: false, future: key > today(),
+    days_off: db.prepare('SELECT * FROM days_off WHERE date IN (' + [...daysOff].map(() => '?').join(',') + ') ORDER BY date').all(...daysOff),
+    week: weekFor(key), week_start: key,
+  };
+}));
+
+app.post('/api/general', wrap(req => {
+  staffOnly(req.user);
+  const { date, changes } = req.body || {};
+  const { key, items, students } = generalContext(date);
+  if (key > today()) fail(400, 'אי אפשר להזין שבוע עתידי');
+  saveChanges(req.user, items, new Set(students.map(s => s.id)), key, changes);
+  audit(req.user.id, 'entry', { class: 'רשימה כללית', week: key, count: changes.length });
   return { ok: true };
 }));
 
@@ -409,7 +464,7 @@ app.get('/api/dashboard', wrap(req => {
   if (weekday(t) >= 4) {
     const ws = weekStart(t);
     for (const c of classes) {
-      const ids = db.prepare(`SELECT id FROM items WHERE active = 1 AND shift = ?`).all(c.shift).map(i => i.id);
+      const ids = db.prepare(`SELECT id FROM items WHERE active = 1 AND general = 0 AND shift = ?`).all(c.shift).map(i => i.id);
       if (!ids.length) continue;
       const has = db.prepare(`SELECT 1 FROM entries e JOIN students s ON s.id = e.student_id
         WHERE s.${groupColumn(c)} = ? AND e.date = ? AND e.item_id IN (${ids.map(() => '?').join(',')}) LIMIT 1`)
@@ -682,19 +737,19 @@ app.post('/api/admin/students/import', staff, wrap(req => {
 app.get('/api/admin/items', staff, wrap(() => ({ items: db.prepare('SELECT * FROM items ORDER BY sort, id').all() })));
 
 app.post('/api/admin/items', adminOnly, wrap(req => {
-  const { name, kind, shift, points, days } = req.body || {};
+  const { name, kind, shift, points, days, general } = req.body || {};
   if (!name) fail(400, 'יש למלא שם סעיף');
   const sort = db.prepare('SELECT COALESCE(MAX(sort), 0) + 1 AS n FROM items').get().n;
-  db.prepare('INSERT INTO items (name, kind, shift, points, days, sort) VALUES (?, ?, ?, ?, ?, ?)')
-    .run(name, kind, shift, Number(points) || 0, days ?? '0,1,2,3,4', sort);
+  db.prepare('INSERT INTO items (name, kind, shift, points, days, sort, general) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run(name, kind, shift, Number(points) || 0, days ?? '0,1,2,3,4', sort, general ? 1 : 0);
   audit(req.user.id, 'item-create', name);
   return { ok: true };
 }));
 
 app.put('/api/admin/items/:id', adminOnly, wrap(req => {
-  const { name, kind, shift, points, days, sort, active } = req.body || {};
-  db.prepare('UPDATE items SET name = ?, kind = ?, shift = ?, points = ?, days = ?, sort = ?, active = ? WHERE id = ?')
-    .run(name, kind, shift, Number(points) || 0, days ?? '', Number(sort) || 0, active ? 1 : 0, Number(req.params.id));
+  const { name, kind, shift, points, days, sort, active, general } = req.body || {};
+  db.prepare('UPDATE items SET name = ?, kind = ?, shift = ?, points = ?, days = ?, sort = ?, active = ?, general = ? WHERE id = ?')
+    .run(name, kind, shift, Number(points) || 0, days ?? '', Number(sort) || 0, active ? 1 : 0, general ? 1 : 0, Number(req.params.id));
   audit(req.user.id, 'item-update', { name, points });
   return { ok: true };
 }));

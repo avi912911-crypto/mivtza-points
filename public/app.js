@@ -122,6 +122,7 @@ async function renderLogin() {
 
 function navLinks() {
   const links = [['#/entry', 'הזנת נקודות'], ['#/dashboard', 'דשבורד'], ['#/report', 'דוחות']];
+  if (isStaff()) links.splice(1, 0, ['#/general', 'רשימה כללית']);
   if (isStaff()) links.push(['#/admin/students', 'תלמידים'], ['#/admin/classes', 'קבוצות'], ['#/admin/weeks', 'לוח שבועות']);
   if (isAdmin()) links.push(['#/admin/users', 'משתמשים'], ['#/admin/items', 'הגדרת ניקוד'], ['#/admin/settings', 'הגדרות']);
   if (isStaff()) links.push(['#/admin/log', 'יומן שינויים']);
@@ -172,6 +173,7 @@ async function route() {
     if (page === 'class') return await viewClass(Number(arg));
     if (page === 'student') return await viewStudent(Number(arg));
     if (page === 'report') return await viewReport();
+    if (page === 'general') return await viewGeneral();
     if (page === 'admin') return await viewAdmin(arg || 'students');
     return await viewEntry();
   } catch (err) {
@@ -226,10 +228,16 @@ async function loadGrid() {
   const e = state.entry;
   const grid = document.getElementById('grid');
   const data = await api(`/api/entry?class_id=${e.classId}&date=${e.date}`);
-  const rules = state.settings.exam_rules;
-  const examPts = g => { for (const r of rules) if (g >= r.min) return r.points; return 0; };
   document.getElementById('datelabel').textContent =
     `${data.week ? weekLabel(data.week) : 'שבוע'} · ${dateRange(data.week_start, addDays(data.week_start, 6))}`;
+  renderGrid(grid, data, changes => api('/api/entry', { body: { class_id: e.classId, date: data.week_start, changes } }),
+    'אין סעיפים שלך להזנה בשבוע זה.');
+}
+
+// The entry table shared by the group screen and the general list. save(changes) stores a batch.
+function renderGrid(grid, data, save, emptyText) {
+  const rules = state.settings.exam_rules;
+  const examPts = g => { for (const r of rules) if (g >= r.min) return r.points; return 0; };
 
   let notice = '';
   if (data.week?.vacation) notice = '<div class="notice">שבוע זה מסומן כחופשה, והנקודות בו לא נספרות.</div>';
@@ -237,7 +245,7 @@ async function loadGrid() {
     `${dayName(d.date)}${d.note ? ' (' + esc(d.note) + ')' : ''}`).join(', ')}. המקסימום בכל סעיף כבר מתחשב בזה.</div>`;
   if (data.future) notice += '<div class="notice">זה שבוע עתידי. אפשר להזין רק עד השבוע הנוכחי.</div>';
   if (data.locked) notice += '<div class="notice bad">הזמן לעדכון השבוע הזה עבר. לתיקון פנה למזכיר.</div>';
-  if (!data.items.length) { grid.innerHTML = notice + '<div class="empty">אין סעיפים שלך להזנה בשבוע זה.</div>'; return; }
+  if (!data.items.length) { grid.innerHTML = notice + `<div class="empty">${emptyText}</div>`; return; }
   if (!data.students.length) { grid.innerHTML = notice + '<div class="empty">אין תלמידים בקבוצה.</div>'; return; }
 
   const readOnly = data.locked || data.future;
@@ -252,7 +260,8 @@ async function loadGrid() {
         : it.kind === 'daily' ? `עד ${it.max} · ${it.points} נק'` : it.points + ' נק\''}</span>
       ${it.kind !== 'exam' && !readOnly ? `<button class="btn secondary small all" data-all="${it.id}">${it.kind === 'daily' ? 'מלא' : 'כולם'}</button>` : ''}</th>`).join('')}
     <th class="num">סה"כ</th></tr></thead><tbody>
-    ${data.students.map(s => `<tr><td class="name">${esc(s.first_name)} ${esc(s.last_name)}</td>
+    ${data.students.map(s => `<tr><td class="name">${esc(s.first_name)} ${esc(s.last_name)}${s.morning !== undefined
+      ? `<div class="muted small">${esc([s.morning, s.afternoon].filter(Boolean).join(' · '))}</div>` : ''}</td>
       ${data.items.map(it => {
         const v = values[`${s.id}:${it.id}`];
         return `<td class="num">${it.kind === 'exam'
@@ -275,7 +284,7 @@ async function loadGrid() {
     const changes = [...pending.values()];
     pending.clear();
     try {
-      await api('/api/entry', { body: { class_id: e.classId, date: data.week_start, changes } });
+      await save(changes);
       toast('✓ נשמר');
     } catch (err) {
       toast('שגיאה בשמירה: ' + err.message, 4000);
@@ -315,6 +324,38 @@ async function loadGrid() {
     queue(sid, iid, v);
   });
   window.onbeforeunload = () => { if (pending.size) { flush(); return 'יש שינויים שלא נשמרו'; } };
+}
+
+// ---------- general list (secretary): all students A-Z ----------
+
+async function viewGeneral() {
+  if (!isStaff()) { location.hash = '#/entry'; return; }
+  const e = state.entry;
+  e.date = weekStart(e.date || state.today);
+  const main = shell(`<h1>רשימה כללית</h1>
+    <p class="sub">כל התלמידים מכל הקבוצות לפי א"ב, לסעיפים שהמזכיר מזין (כמו שיחה ביום ג'). לרשימה ריקה להדפסה: דוחות ← רשימה ריקה.</p>
+    <div class="card"><div class="toolbar">
+      <div class="datebox"><button class="btn secondary small" id="prev" title="שבוע קודם">→</button>
+        <input type="date" id="date" value="${e.date}">
+        <button class="btn secondary small" id="next" title="שבוע הבא">←</button>
+        <button class="btn ghost small" id="today">השבוע</button></div>
+      <input type="search" id="find" placeholder="חיפוש תלמיד" style="width:180px">
+      <span class="spacer"></span><span id="datelabel" class="muted"></span>
+    </div><div id="grid"></div></div>`);
+  main.querySelector('#prev').onclick = () => { e.date = addDays(e.date, -7); viewGeneral(); };
+  main.querySelector('#next').onclick = () => { e.date = addDays(e.date, 7); viewGeneral(); };
+  main.querySelector('#today').onclick = () => { e.date = state.today; viewGeneral(); };
+  main.querySelector('#date').onchange = ev => { if (ev.target.value) { e.date = ev.target.value; viewGeneral(); } };
+  const data = await api(`/api/general?date=${e.date}`);
+  main.querySelector('#datelabel').textContent =
+    `${data.week ? weekLabel(data.week) : 'שבוע'} · ${dateRange(data.week_start, addDays(data.week_start, 6))}`;
+  const grid = main.querySelector('#grid');
+  renderGrid(grid, data, changes => api('/api/general', { body: { date: data.week_start, changes } }),
+    'אין סעיפים ברשימה הכללית. בהגדרת ניקוד בוחרים בסעיף "מזכיר, רשימה כללית".');
+  main.querySelector('#find').oninput = ev => {
+    const q = ev.target.value.trim();
+    grid.querySelectorAll('tbody tr').forEach(tr => { tr.style.display = !q || tr.cells[0].textContent.includes(q) ? '' : 'none'; });
+  };
 }
 
 // Full = green, partly attended = soft colour, none = empty
@@ -441,8 +482,32 @@ const REPORT_SORT = {
   name: ['לפי שם', (a, b) => a.name.localeCompare(b.name, 'he')],
 };
 
+const reportTypeSelect = type => isStaff() ? `<select id="r-type">
+  <option value="weekly" ${type === 'weekly' ? 'selected' : ''}>דוח שבועי</option>
+  <option value="blank" ${type === 'blank' ? 'selected' : ''}>רשימה ריקה למילוי ביד</option></select>` : '';
+
+// Save-as-PDF through the browser print dialog; the document title becomes the file name.
+function printAsPdf(fileName) {
+  const prev = document.title;
+  document.title = fileName;
+  toast('בחלון שנפתח בחר "שמירה כ-PDF" ולחץ שמירה', 5000);
+  setTimeout(() => { window.print(); document.title = prev; }, 300);
+}
+
+function downloadSheet(aoa, cols, fileName) {
+  if (!window.XLSX) { toast('רכיב האקסל לא נטען. רענן את הדף.', 4000); return; }
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!cols'] = cols.map(wch => ({ wch }));
+  ws['!merges'] = [0, 1, 2].map(r => ({ s: { r, c: 0 }, e: { r, c: cols.length - 1 } }));
+  const wb = XLSX.utils.book_new();
+  wb.Workbook = { Views: [{ RTL: true }] };
+  XLSX.utils.book_append_sheet(wb, ws, 'דוח');
+  XLSX.writeFile(wb, fileName + '.xlsx');
+}
+
 async function viewReport() {
-  const r = state.report ||= { sort: 'week' };
+  const r = state.report ||= { sort: 'week', type: 'weekly' };
+  if (r.type === 'blank' && isStaff()) return viewBlankList(r);
   const q = new URLSearchParams();
   if (r.week) q.set('week', r.week);
   if (r.classId) q.set('class_id', r.classId);
@@ -456,6 +521,7 @@ async function viewReport() {
 
   const main = shell(`<h1>דוחות</h1><p class="sub">בחר שבוע וקבוצה, והורד את הדוח ל-PDF או לאקסל.</p>
     <div class="card no-print"><div class="toolbar">
+      ${reportTypeSelect('weekly')}
       <select id="r-week">${d.weeks.map(w => `<option value="${w.start_date}" ${w.start_date === r.week ? 'selected' : ''}>
         ${esc(weekLabel(w))} (${shortDate(w.start_date)})${w.vacation ? ' · חופשה' : ''}</option>`).join('')}</select>
       <select id="r-group"><option value="">${state.me.role === 'teacher' ? 'כל התלמידים שלי' : 'כל התלמידים'}</option>
@@ -491,35 +557,60 @@ async function viewReport() {
       <div class="report-foot muted">הופק ב-${new Date().toLocaleDateString('he-IL')} · ${hebDate(state.today)}</div>
     </div>`);
 
+  main.querySelector('#r-type')?.addEventListener('change', ev => { r.type = ev.target.value; viewReport(); });
   main.querySelector('#r-week').onchange = ev => { r.week = ev.target.value; viewReport(); };
   main.querySelector('#r-group').onchange = ev => { r.classId = Number(ev.target.value) || null; viewReport(); };
   main.querySelector('#r-sort').onchange = ev => { r.sort = ev.target.value; viewReport(); };
   main.querySelector('#r-print').onclick = () => window.print();
   const fileName = `${title} - ${scope}`.replace(/[\\/:*?"<>|·]/g, '').replace(/\s+/g, ' ').trim();
 
-  // The browser's own "Save as PDF" renders Hebrew correctly; the document title becomes the file name.
-  main.querySelector('#r-pdf').onclick = () => {
-    const prev = document.title;
-    document.title = fileName;
-    toast('בחלון שנפתח בחר "שמירה כ-PDF" ולחץ שמירה', 5000);
-    setTimeout(() => { window.print(); document.title = prev; }, 300);
-  };
+  main.querySelector('#r-pdf').onclick = () => printAsPdf(fileName);
+  main.querySelector('#r-xlsx').onclick = () => downloadSheet([
+    [state.settings.program_name], [title], [`${range} · ${scope}`], [],
+    ['#', 'שם התלמיד', 'קבוצת בוקר', 'קבוצת אחה"צ', 'נקודות השבוע', 'מצטבר מתחילת המבצע', 'נשאר ליעד (%)'],
+    ...rows.map((x, i) => [i + 1, x.name, x.morning, x.afternoon, x.week, x.total, x.remaining_pct]),
+  ], [5, 24, 16, 16, 13, 18, 14], fileName);
+}
 
-  main.querySelector('#r-xlsx').onclick = () => {
-    if (!window.XLSX) { toast('רכיב האקסל לא נטען. רענן את הדף.', 4000); return; }
-    const aoa = [
-      [state.settings.program_name], [title], [`${range} · ${scope}`], [],
-      ['#', 'שם התלמיד', 'קבוצת בוקר', 'קבוצת אחה"צ', 'נקודות השבוע', 'מצטבר מתחילת המבצע', 'נשאר ליעד (%)'],
-      ...rows.map((x, i) => [i + 1, x.name, x.morning, x.afternoon, x.week, x.total, x.remaining_pct]),
-    ];
-    const ws = XLSX.utils.aoa_to_sheet(aoa);
-    ws['!cols'] = [{ wch: 5 }, { wch: 24 }, { wch: 16 }, { wch: 16 }, { wch: 13 }, { wch: 18 }, { wch: 14 }];
-    ws['!merges'] = [0, 1, 2].map(r => ({ s: { r, c: 0 }, e: { r, c: 6 } }));
-    const wb = XLSX.utils.book_new();
-    wb.Workbook = { Views: [{ RTL: true }] };
-    XLSX.utils.book_append_sheet(wb, ws, 'דוח');
-    XLSX.writeFile(wb, fileName + '.xlsx');
-  };
+// All students A-Z with empty columns for the general-list items, to fill in by hand and copy in later.
+async function viewBlankList(r) {
+  const d = await api('/api/general?date=' + (r.week || state.today));
+  const cols = d.items.length ? d.items.map(it => it.name) : ['נוכחות'];
+  const title = `רשימה למילוי · ${cols.join(', ')}`;
+  const range = dateRange(d.week_start, addDays(d.week_start, 6));
+  const sub = `${d.week ? weekLabel(d.week) + ' · ' : ''}${range}`;
+  const main = shell(`<h1>דוחות</h1><p class="sub">רשימה של כל התלמידים לפי א"ב, עם עמודות ריקות לרישום ביד. אחר כך מעתיקים למסך "רשימה כללית".</p>
+    <div class="card no-print"><div class="toolbar">
+      ${reportTypeSelect('blank')}
+      <input type="date" id="r-date" value="${d.week_start}" title="שבוע">
+      <span class="spacer"></span>
+      <button class="btn" id="r-pdf">הורדת PDF</button>
+      <button class="btn secondary" id="r-xlsx">הורדת אקסל</button>
+      <button class="btn ghost" id="r-print">הדפסה</button>
+    </div></div>
+    <div class="card report-doc" id="report-doc">
+      <div class="report-head">
+        ${state.settings.logo ? `<img src="${esc(state.settings.logo)}" alt="לוגו">` : ''}
+        <div><div class="report-program">${esc(state.settings.program_name)}</div>
+          <h2>${esc(title)}</h2>
+          <div class="muted">${esc(sub)} · ${d.students.length} תלמידים</div></div>
+      </div>
+      <table class="report-table blank-table"><thead><tr><th class="num">#</th><th>שם התלמיד</th><th>קבוצת בוקר</th><th>קבוצת אחה"צ</th>
+        ${cols.map(c => `<th class="blank-col">${esc(c)}</th>`).join('')}</tr></thead>
+      <tbody>${d.students.map((x, i) => `<tr><td class="num">${i + 1}</td><td>${esc(x.name)}</td>
+        <td>${esc(x.morning)}</td><td>${esc(x.afternoon)}</td>${cols.map(() => '<td class="blank-col"></td>').join('')}</tr>`).join('')
+        || `<tr><td colspan="${4 + cols.length}" class="empty">אין תלמידים</td></tr>`}</tbody></table>
+    </div>`);
+  const fileName = `רשימה למילוי ${cols.join(' ')} ${d.week ? weekLabel(d.week) : ''}`.replace(/[\\/:*?"<>|·]/g, '').replace(/\s+/g, ' ').trim();
+  main.querySelector('#r-type').onchange = ev => { r.type = ev.target.value; viewReport(); };
+  main.querySelector('#r-date').onchange = ev => { if (ev.target.value) { r.week = weekStart(ev.target.value); viewReport(); } };
+  main.querySelector('#r-print').onclick = () => window.print();
+  main.querySelector('#r-pdf').onclick = () => printAsPdf(fileName);
+  main.querySelector('#r-xlsx').onclick = () => downloadSheet([
+    [state.settings.program_name], [title], [sub], [],
+    ['#', 'שם התלמיד', 'קבוצת בוקר', 'קבוצת אחה"צ', ...cols],
+    ...d.students.map((x, i) => [i + 1, x.name, x.morning, x.afternoon, ...cols.map(() => '')]),
+  ], [5, 24, 16, 16, ...cols.map(() => 18)], fileName);
 }
 
 // ---------- admin ----------
@@ -705,7 +796,7 @@ async function adminItems() {
     <p class="sub">שינוי נקודות חל גם על שבועות שכבר הוזנו. מקסימום שבועי בלי מבחנים: <strong>${weekly}</strong></p>
     <div class="card"><div class="table-wrap"><table><thead><tr><th>סעיף</th><th>סוג</th><th>מי מזין</th>
       <th class="num">נקודות</th><th>ימים</th><th class="num">פעיל</th><th></th></tr></thead><tbody>
-      ${items.map(i => `<tr><td>${esc(i.name)}</td><td>${KIND[i.kind]}</td><td>${SHIFT[i.shift]}</td>
+      ${items.map(i => `<tr><td>${esc(i.name)}</td><td>${KIND[i.kind]}</td><td>${i.general ? 'רשימה כללית' : SHIFT[i.shift]}</td>
         <td class="num">${i.kind === 'exam' ? 'לפי ציון' : i.points}</td>
         <td>${i.kind === 'exam' ? '' : i.days.split(',').filter(Boolean).map(d => DAYS[d]).join(' ')}</td>
         <td class="num">${i.active ? '✓' : ''}</td><td><button class="btn secondary small" data-edit="${i.id}">עריכה</button></td></tr>`).join('')}
@@ -717,13 +808,14 @@ async function adminItems() {
       <p class="muted">ציון מתחת לשורה הנמוכה ביותר מקבל 0.</p></div>`);
   const form = i => `<label class="field">שם<input type="text" name="name" value="${esc(i?.name)}" required></label>
     <label class="field">סוג<select name="kind">${Object.entries(KIND).map(([k, v]) => `<option value="${k}" ${(i?.kind || 'daily') === k ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
-    <label class="field">מי מזין<select name="shift">${Object.entries(SHIFT).map(([k, v]) => `<option value="${k}" ${(i?.shift || 'morning') === k ? 'selected' : ''}>${v === 'מזכירות' ? 'מזכיר + מורה מורשה' : 'מורה ' + v}</option>`).join('')}</select></label>
+    <label class="field">מי מזין<select name="shift">${Object.entries(SHIFT).map(([k, v]) => `<option value="${k}" ${!i?.general && (i?.shift || 'morning') === k ? 'selected' : ''}>${v === 'מזכירות' ? 'מזכיר + מורה מורשה, בטבלת הקבוצה' : 'מורה ' + v}</option>`).join('')}
+      <option value="general" ${i?.general ? 'selected' : ''}>מזכיר, רשימה כללית של כל התלמידים</option></select></label>
     <label class="field">נקודות לפעם (במבחן לא בשימוש)<input type="number" name="points" value="${i?.points ?? 0}"></label>
     <div class="field">ימים (לסעיף יומי: ימי לימוד; לשבועי: היום שבו הוא מתקיים)<div class="form-row">${DAYS.map((d, n) =>
       `<label class="check"><input type="checkbox" name="d${n}" ${(i ? i.days.split(',') : ['0', '1', '2', '3', '4']).includes(String(n)) ? 'checked' : ''}>${d}</label>`).join('')}</div></div>
     <label class="field">סדר<input type="number" name="sort" value="${i?.sort ?? 0}"></label>
     ${i ? `<label class="check"><input type="checkbox" name="active" ${i.active ? 'checked' : ''}> פעיל</label>` : ''}`;
-  const body = d => ({ ...d, days: DAYS.map((_, n) => d['d' + n] ? n : null).filter(n => n !== null).join(','), active: !!d.active });
+  const body = d => ({ ...d, shift: d.shift === 'general' ? 'office' : d.shift, general: d.shift === 'general', days: DAYS.map((_, n) => d['d' + n] ? n : null).filter(n => n !== null).join(','), active: !!d.active });
   main.querySelector('#add').onclick = () => openDialog('סעיף חדש', form(null), async d => {
     await api('/api/admin/items', { body: body(d) }); adminItems();
   });
