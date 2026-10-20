@@ -51,7 +51,41 @@ function examPoints(grade, rules) {
 
 function pointsFor(item, value, rules) {
   if (value == null) return 0;
-  return item.kind === 'exam' ? examPoints(value, rules) : (value ? item.points : 0);
+  // daily items hold the number of times attended that week; weekly items hold 1
+  return item.kind === 'exam' ? examPoints(value, rules) : item.points * value;
+}
+
+// Daily items used to be stored one row per day. They are now one row per week holding a count,
+// so any per-day rows are folded into their week once.
+function migrateToWeeklyCounts() {
+  if (getSettings().entry_mode === 'weekly_counts') return;
+  const rows = db.prepare(`SELECT e.* FROM entries e JOIN items i ON i.id = e.item_id WHERE i.kind = 'daily'`).all();
+  const merged = new Map();
+  for (const r of rows) {
+    const key = `${r.student_id}:${r.item_id}:${weekStart(r.date)}`;
+    const m = merged.get(key);
+    if (m) { m.value += r.value; if (r.updated_at > m.updated_at) Object.assign(m, { updated_at: r.updated_at, updated_by: r.updated_by }); }
+    else merged.set(key, { ...r, date: weekStart(r.date) });
+  }
+  db.exec('BEGIN');
+  try {
+    db.exec(`DELETE FROM entries WHERE item_id IN (SELECT id FROM items WHERE kind = 'daily')`);
+    const ins = db.prepare('INSERT INTO entries (student_id, item_id, date, value, updated_by, updated_at) VALUES (?, ?, ?, ?, ?, ?)');
+    for (const m of merged.values()) ins.run(m.student_id, m.item_id, m.date, m.value, m.updated_by, m.updated_at);
+    db.prepare(`INSERT OR REPLACE INTO settings (key, value) VALUES ('entry_mode', 'weekly_counts')`).run();
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+  if (rows.length) console.log(`Folded ${rows.length} daily entries into ${merged.size} weekly counts`);
+}
+migrateToWeeklyCounts();
+
+// How many study days of the week an item can be attended on (its weekdays, minus days off).
+function maxCount(item, ws, daysOff) {
+  return item.days.split(',').filter(Boolean)
+    .filter(d => !daysOff.has(addDays(ws, Number(d)))).length;
 }
 
 function wrap(fn) {
@@ -197,7 +231,7 @@ function accessibleClasses(user) {
     .filter(c => c.shifts.length > 0);
 }
 
-// Teachers may change a day up to edit_days after it; weekly items count from the week's Saturday.
+// Teachers may change a week up to edit_days after its Saturday.
 function isLocked(user, lastDay) {
   if (user.role !== 'teacher') return false;
   const t = today();
@@ -212,27 +246,26 @@ app.get('/api/entry/classes', wrap(req => ({
   classes: accessibleClasses(req.user).map(c => ({ id: c.id, name: c.name, shift: c.shift, shifts: c.shifts })),
 })));
 
-function entryContext(req, classId, date, mode) {
+function entryContext(req, classId, date) {
   if (!isDate(date)) fail(400, 'תאריך לא תקין');
   const cls = db.prepare('SELECT * FROM classes WHERE id = ?').get(Number(classId));
   if (!cls) fail(404, 'קבוצה לא נמצאה');
   const shifts = shiftsFor(req.user, cls);
   if (!shifts.length) fail(403, 'אין הרשאה לקבוצה זו');
 
-  const wd = weekday(date);
+  const key = weekStart(date);
+  const lastDay = addDays(key, 6);
+  const daysOff = new Set(db.prepare('SELECT date FROM days_off WHERE date BETWEEN ? AND ?').all(key, lastDay).map(d => d.date));
   const items = db.prepare('SELECT * FROM items WHERE active = 1 ORDER BY sort, id').all()
     .filter(it => shifts.includes(it.shift))
-    .filter(it => mode === 'daily'
-      ? it.kind === 'daily' && it.days.split(',').includes(String(wd))
-      : it.kind !== 'daily');
-  const key = mode === 'daily' ? date : weekStart(date);
-  const lastDay = mode === 'daily' ? date : addDays(key, 6);
-  return { cls, items, key, lastDay };
+    .map(it => ({ ...it, max: it.kind === 'daily' ? maxCount(it, key, daysOff) : it.kind === 'weekly' ? 1 : 100 }))
+    .filter(it => it.max > 0);
+  return { cls, items, key, lastDay, daysOff };
 }
 
 app.get('/api/entry', wrap(req => {
-  const { class_id, date, mode = 'daily' } = req.query;
-  const { cls, items, key, lastDay } = entryContext(req, class_id, date, mode);
+  const { class_id, date } = req.query;
+  const { cls, items, key, lastDay, daysOff } = entryContext(req, class_id, date);
   const students = db.prepare(`SELECT id, first_name, last_name FROM students
                                WHERE ${groupColumn(cls)} = ? AND active = 1 ORDER BY last_name, first_name`).all(cls.id);
   const values = {};
@@ -243,23 +276,22 @@ app.get('/api/entry', wrap(req => {
       .all(key, ...items.map(i => i.id), ...students.map(s => s.id));
     for (const r of rows) values[`${r.student_id}:${r.item_id}`] = r.value;
   }
-  const dayOff = mode === 'daily' ? db.prepare('SELECT * FROM days_off WHERE date = ?').get(date) : null;
-  const week = weekFor(date);
   return {
     class: { id: cls.id, name: cls.name, shift: cls.shift },
     items, students, values,
     locked: isLocked(req.user, lastDay),
-    future: date > today() && mode === 'daily',
-    day_off: dayOff || null,
-    week,
+    future: key > today(),
+    days_off: db.prepare('SELECT * FROM days_off WHERE date IN (' + [...daysOff].map(() => '?').join(',') + ') ORDER BY date').all(...daysOff),
+    week: weekFor(key),
+    week_start: key,
   };
 }));
 
 app.post('/api/entry', wrap(req => {
-  const { class_id, date, mode = 'daily', changes } = req.body || {};
-  const { cls, items, key, lastDay } = entryContext(req, class_id, date, mode);
-  if (isLocked(req.user, lastDay)) fail(403, 'הזמן לעדכון היום הזה עבר. פנה למזכיר.');
-  if (mode === 'daily' && date > today()) fail(400, 'אי אפשר להזין יום עתידי');
+  const { class_id, date, changes } = req.body || {};
+  const { cls, items, key, lastDay } = entryContext(req, class_id, date);
+  if (isLocked(req.user, lastDay)) fail(403, 'הזמן לעדכון השבוע הזה עבר. פנה למזכיר.');
+  if (key > today()) fail(400, 'אי אפשר להזין שבוע עתידי');
   if (!Array.isArray(changes)) fail(400, 'נתונים חסרים');
 
   const allowedItems = new Map(items.map(i => [i.id, i]));
@@ -279,8 +311,9 @@ app.post('/api/entry', wrap(req => {
         del.run(c.student_id, item.id, key);
       } else {
         const v = Number(c.value);
-        if (item.kind === 'exam' ? !(v >= 0 && v <= 100) : v !== 1) fail(400, 'ערך לא תקין');
-        upsert.run(c.student_id, item.id, key, Math.round(v), req.user.id, now);
+        const min = item.kind === 'exam' ? 0 : 1;
+        if (!Number.isInteger(v) || v < min || v > item.max) fail(400, `ערך לא תקין ב${item.name}`);
+        upsert.run(c.student_id, item.id, key, v, req.user.id, now);
       }
     }
     db.exec('COMMIT');
@@ -288,7 +321,7 @@ app.post('/api/entry', wrap(req => {
     db.exec('ROLLBACK');
     throw e;
   }
-  audit(req.user.id, 'entry', { class: cls.name, date: key, mode, count: changes.length });
+  audit(req.user.id, 'entry', { class: cls.name, week: key, count: changes.length });
   return { ok: true };
 }));
 
@@ -370,19 +403,17 @@ app.get('/api/dashboard', wrap(req => {
     };
   }).sort((a, b) => b.avg_total - a.avg_total);
 
-  // Classes with no entry today, per shift (only on study days)
+  // From Thursday on: groups with nothing entered yet for this week
   const t = today();
   const missing = [];
-  const off = db.prepare('SELECT 1 FROM days_off WHERE date = ?').get(t);
-  if (!off && weekday(t) <= 4) {
-    const shiftItems = shift => db.prepare(`SELECT id FROM items WHERE active = 1 AND kind = 'daily' AND shift = ?`)
-      .all(shift).map(i => i.id);
+  if (weekday(t) >= 4) {
+    const ws = weekStart(t);
     for (const c of classes) {
-      const ids = shiftItems(c.shift);
+      const ids = db.prepare(`SELECT id FROM items WHERE active = 1 AND shift = ?`).all(c.shift).map(i => i.id);
       if (!ids.length) continue;
       const has = db.prepare(`SELECT 1 FROM entries e JOIN students s ON s.id = e.student_id
         WHERE s.${groupColumn(c)} = ? AND e.date = ? AND e.item_id IN (${ids.map(() => '?').join(',')}) LIMIT 1`)
-        .get(c.id, t, ...ids);
+        .get(c.id, ws, ...ids);
       if (!has) missing.push({ class_name: c.name, shift: c.shift });
     }
   }
@@ -397,7 +428,7 @@ app.get('/api/dashboard', wrap(req => {
     classes: classStats,
     top_week: [...rows].sort((a, b) => b.week - a.week).slice(0, 10),
     top_total: [...rows].sort((a, b) => b.total - a.total).slice(0, 10),
-    missing_today: missing,
+    missing_week: missing,
   };
 }));
 

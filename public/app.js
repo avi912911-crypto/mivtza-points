@@ -191,7 +191,7 @@ async function boot() {
   if (state.me.must_change) changePassword(true);
 }
 
-// ---------- entry (daily / weekly table) ----------
+// ---------- entry (weekly table) ----------
 
 async function viewEntry() {
   const { classes } = await api('/api/entry/classes');
@@ -201,26 +201,22 @@ async function viewEntry() {
     return;
   }
   if (!classes.find(c => c.id === e.classId)) e.classId = classes[0].id;
-  e.date ||= state.today;
-  e.mode ||= 'daily';
-  const main = shell(`<h1>הזנת נקודות</h1><p class="sub">לחיצה על תא מסמנת או מבטלת. הכול נשמר אוטומטית.</p>
+  e.date = weekStart(e.date || state.today);
+  const main = shell(`<h1>הזנת נקודות</h1>
+    <p class="sub">בכל סעיף רושמים כמה פעמים התלמיד נכח השבוע. לחיצה על תא מוסיפה פעם אחת (אחרי המקסימום חוזר לאפס), ואפשר גם להקליד מספר. הכול נשמר אוטומטית.</p>
     <div class="card"><div class="toolbar">
       ${classes.length > 1 ? `<select id="cls">${classes.map(c =>
         `<option value="${c.id}" ${c.id === e.classId ? 'selected' : ''}>${esc(c.name)} · ${SHIFT[c.shift]}</option>`).join('')}</select>`
         : `<strong>${esc(classes[0].name)} · ${SHIFT[classes[0].shift]}</strong>`}
-      <div class="seg"><button data-mode="daily" class="${e.mode === 'daily' ? 'on' : ''}">יומי</button>
-        <button data-mode="weekly" class="${e.mode === 'weekly' ? 'on' : ''}">שבועי ומבחנים</button></div>
-      <div class="datebox"><button class="btn secondary small" id="prev">→</button>
+      <div class="datebox"><button class="btn secondary small" id="prev" title="שבוע קודם">→</button>
         <input type="date" id="date" value="${e.date}">
-        <button class="btn secondary small" id="next">←</button>
-        <button class="btn ghost small" id="today">היום</button></div>
+        <button class="btn secondary small" id="next" title="שבוע הבא">←</button>
+        <button class="btn ghost small" id="today">השבוע</button></div>
       <span class="spacer"></span><span id="datelabel" class="muted"></span>
     </div><div id="grid"></div></div>`);
   main.querySelector('#cls')?.addEventListener('change', ev => { e.classId = Number(ev.target.value); loadGrid(); });
-  main.querySelectorAll('.seg button').forEach(b => b.onclick = () => { e.mode = b.dataset.mode; viewEntry(); });
-  const step = e.mode === 'daily' ? 1 : 7;
-  main.querySelector('#prev').onclick = () => { e.date = addDays(e.date, -step); viewEntry(); };
-  main.querySelector('#next').onclick = () => { e.date = addDays(e.date, step); viewEntry(); };
+  main.querySelector('#prev').onclick = () => { e.date = addDays(e.date, -7); viewEntry(); };
+  main.querySelector('#next').onclick = () => { e.date = addDays(e.date, 7); viewEntry(); };
   main.querySelector('#today').onclick = () => { e.date = state.today; viewEntry(); };
   main.querySelector('#date').onchange = ev => { if (ev.target.value) { e.date = ev.target.value; viewEntry(); } };
   await loadGrid();
@@ -229,54 +225,48 @@ async function viewEntry() {
 async function loadGrid() {
   const e = state.entry;
   const grid = document.getElementById('grid');
-  const data = await api(`/api/entry?class_id=${e.classId}&date=${e.date}&mode=${e.mode}`);
+  const data = await api(`/api/entry?class_id=${e.classId}&date=${e.date}`);
   const rules = state.settings.exam_rules;
   const examPts = g => { for (const r of rules) if (g >= r.min) return r.points; return 0; };
-  const label = document.getElementById('datelabel');
-  label.textContent = e.mode === 'daily'
-    ? `${dayName(e.date)} · ${hebDate(e.date)}${data.week ? ' · ' + weekLabel(data.week) : ''}`
-    : `${data.week ? weekLabel(data.week) : 'שבוע'} · ${dateRange(weekStart(e.date), addDays(weekStart(e.date), 6))}`;
+  document.getElementById('datelabel').textContent =
+    `${data.week ? weekLabel(data.week) : 'שבוע'} · ${dateRange(data.week_start, addDays(data.week_start, 6))}`;
 
   let notice = '';
   if (data.week?.vacation) notice = '<div class="notice">שבוע זה מסומן כחופשה, והנקודות בו לא נספרות.</div>';
-  if (data.day_off) notice += `<div class="notice">יום ללא לימודים${data.day_off.note ? ': ' + esc(data.day_off.note) : ''}.</div>`;
-  if (data.future) notice += '<div class="notice">זה יום עתידי. אפשר להזין רק עד היום.</div>';
-  if (data.locked) notice += '<div class="notice bad">הזמן לעדכון עבר. לתיקון פנה למזכיר.</div>';
-  if (!data.items.length) {
-    grid.innerHTML = notice + `<div class="empty">${e.mode === 'daily'
-      ? 'אין סעיפים יומיים להזנה ביום זה.' : 'אין סעיפים שבועיים שלך להזנה.'}</div>`;
-    return;
-  }
+  if (data.days_off.length) notice += `<div class="notice">ימים ללא לימודים השבוע: ${data.days_off.map(d =>
+    `${dayName(d.date)}${d.note ? ' (' + esc(d.note) + ')' : ''}`).join(', ')}. המקסימום בכל סעיף כבר מתחשב בזה.</div>`;
+  if (data.future) notice += '<div class="notice">זה שבוע עתידי. אפשר להזין רק עד השבוע הנוכחי.</div>';
+  if (data.locked) notice += '<div class="notice bad">הזמן לעדכון השבוע הזה עבר. לתיקון פנה למזכיר.</div>';
+  if (!data.items.length) { grid.innerHTML = notice + '<div class="empty">אין סעיפים שלך להזנה בשבוע זה.</div>'; return; }
   if (!data.students.length) { grid.innerHTML = notice + '<div class="empty">אין תלמידים בקבוצה.</div>'; return; }
 
   const readOnly = data.locked || data.future;
   const values = data.values;
-  const ptsOf = (it, v) => v == null ? 0 : it.kind === 'exam' ? examPts(v) : (v ? it.points : 0);
+  const itemById = new Map(data.items.map(it => [it.id, it]));
+  const ptsOf = (it, v) => v == null ? 0 : it.kind === 'exam' ? examPts(v) : v * it.points;
   const rowTotal = s => data.items.reduce((a, it) => a + ptsOf(it, values[`${s.id}:${it.id}`]), 0);
+  const counterHtml = (it, v) => it.kind === 'weekly' ? '✓' : (v || '');
 
   grid.innerHTML = notice + `<div class="table-wrap"><table class="entry"><thead><tr><th class="name">תלמיד</th>
-    ${data.items.map(it => `<th class="num">${esc(it.name)}<span class="pts">${it.kind === 'exam' ? 'ציון' : it.points + ' נק\''}</span>
-      ${it.kind !== 'exam' && !readOnly ? `<button class="btn secondary small all" data-all="${it.id}">כולם</button>` : ''}</th>`).join('')}
+    ${data.items.map(it => `<th class="num">${esc(it.name)}<span class="pts">${it.kind === 'exam' ? 'ציון'
+        : it.kind === 'daily' ? `עד ${it.max} · ${it.points} נק'` : it.points + ' נק\''}</span>
+      ${it.kind !== 'exam' && !readOnly ? `<button class="btn secondary small all" data-all="${it.id}">${it.kind === 'daily' ? 'מלא' : 'כולם'}</button>` : ''}</th>`).join('')}
     <th class="num">סה"כ</th></tr></thead><tbody>
     ${data.students.map(s => `<tr><td class="name">${esc(s.first_name)} ${esc(s.last_name)}</td>
       ${data.items.map(it => {
         const v = values[`${s.id}:${it.id}`];
         return `<td class="num">${it.kind === 'exam'
           ? `<input type="number" class="grade-input" min="0" max="100" data-s="${s.id}" data-i="${it.id}" value="${v ?? ''}" ${readOnly ? 'disabled' : ''}><span class="grade-pts" id="gp-${s.id}-${it.id}">${v != null ? examPts(v) + ' נק\'' : ''}</span>`
-          : `<button class="cell-toggle ${v ? 'on' : ''}" data-s="${s.id}" data-i="${it.id}" ${readOnly ? 'disabled' : ''}>✓</button>`}</td>`;
+          : `<button class="cell-toggle ${cellClass(it, v)}" data-s="${s.id}" data-i="${it.id}" ${readOnly ? 'disabled' : ''}>${counterHtml(it, v)}</button>`}</td>`;
       }).join('')}
       <td class="num rowtotal" id="rt-${s.id}">${rowTotal(s)}</td></tr>`).join('')}
     </tbody></table></div>`;
 
   const pending = new Map();
-  const refreshRow = sid => {
-    const s = data.students.find(x => x.id === sid);
-    document.getElementById(`rt-${sid}`).textContent = rowTotal(s);
-  };
   const queue = (sid, iid, value) => {
     values[`${sid}:${iid}`] = value;
     pending.set(`${sid}:${iid}`, { student_id: sid, item_id: iid, value });
-    refreshRow(sid);
+    document.getElementById(`rt-${sid}`).textContent = rowTotal(data.students.find(x => x.id === sid));
     clearTimeout(queue.t);
     queue.t = setTimeout(flush, 500);
   };
@@ -285,26 +275,37 @@ async function loadGrid() {
     const changes = [...pending.values()];
     pending.clear();
     try {
-      await api('/api/entry', { body: { class_id: e.classId, date: e.date, mode: e.mode, changes } });
+      await api('/api/entry', { body: { class_id: e.classId, date: data.week_start, changes } });
       toast('✓ נשמר');
     } catch (err) {
       toast('שגיאה בשמירה: ' + err.message, 4000);
     }
   };
+  const setCell = (btn, v) => {
+    const it = itemById.get(Number(btn.dataset.i));
+    v = v ? Math.min(v, it.max) : null;
+    btn.className = `cell-toggle ${cellClass(it, v)}`;
+    btn.textContent = counterHtml(it, v);
+    queue(Number(btn.dataset.s), it.id, v);
+  };
 
-  grid.querySelectorAll('.cell-toggle').forEach(btn => btn.onclick = () => {
-    const on = !btn.classList.contains('on');
-    btn.classList.toggle('on', on);
-    queue(Number(btn.dataset.s), Number(btn.dataset.i), on ? 1 : null);
+  grid.querySelectorAll('.cell-toggle').forEach(btn => {
+    btn.onclick = () => {
+      const it = itemById.get(Number(btn.dataset.i));
+      const v = values[`${btn.dataset.s}:${it.id}`] || 0;
+      setCell(btn, v >= it.max ? 0 : v + 1);
+    };
+    // Typing a digit on a focused cell sets the count directly
+    btn.onkeydown = ev => {
+      if (/^[0-9]$/.test(ev.key)) { ev.preventDefault(); setCell(btn, Number(ev.key)); }
+      else if (ev.key === 'Backspace' || ev.key === 'Delete') { ev.preventDefault(); setCell(btn, 0); }
+    };
   });
   grid.querySelectorAll('[data-all]').forEach(btn => btn.onclick = () => {
-    const iid = Number(btn.dataset.all);
-    const cells = [...grid.querySelectorAll(`.cell-toggle[data-i="${iid}"]`)];
-    const allOn = cells.every(c => c.classList.contains('on'));
-    cells.forEach(c => {
-      c.classList.toggle('on', !allOn);
-      queue(Number(c.dataset.s), iid, allOn ? null : 1);
-    });
+    const it = itemById.get(Number(btn.dataset.all));
+    const cells = [...grid.querySelectorAll(`.cell-toggle[data-i="${it.id}"]`)];
+    const allFull = cells.every(c => values[`${c.dataset.s}:${it.id}`] === it.max);
+    cells.forEach(c => setCell(c, allFull ? 0 : it.max));
   });
   grid.querySelectorAll('.grade-input').forEach(inp => inp.onchange = () => {
     const sid = Number(inp.dataset.s), iid = Number(inp.dataset.i);
@@ -314,6 +315,12 @@ async function loadGrid() {
     queue(sid, iid, v);
   });
   window.onbeforeunload = () => { if (pending.size) { flush(); return 'יש שינויים שלא נשמרו'; } };
+}
+
+// Full = green, partly attended = soft colour, none = empty
+function cellClass(it, v) {
+  if (!v) return '';
+  return v >= it.max ? 'on' : 'part';
 }
 
 // ---------- dashboard ----------
@@ -335,8 +342,8 @@ async function viewDashboard() {
       <div class="card stat"><div class="label">הגיעו ליעד</div><div class="value">${fmt(d.reached_target)}</div>
         <div class="hint">${d.totalWeeks} שבועות במבצע</div></div>
     </div>
-    ${d.missing_today.length ? `<div class="card"><h2>עדיין לא הוזן היום</h2>
-      ${d.missing_today.map(m => `<span class="badge bad" style="margin:3px">${esc(m.class_name)} · ${SHIFT[m.shift]}</span>`).join('')}</div>` : ''}
+    ${d.missing_week.length ? `<div class="card"><h2>עדיין לא הוזן השבוע</h2>
+      ${d.missing_week.map(m => `<span class="badge bad" style="margin:3px">${esc(m.class_name)} · ${SHIFT[m.shift]}</span>`).join('')}</div>` : ''}
     ${['morning', 'afternoon'].map(sh => groupRanking(d, sh)).join('')}
     <div class="grid grid-2">
       <div class="card"><h2>מצטייני השבוע</h2>${topList(d.top_week, 'week')}</div>
@@ -695,7 +702,7 @@ async function adminItems() {
     a + (i.kind === 'daily' ? i.points * i.days.split(',').filter(Boolean).length : i.kind === 'weekly' ? i.points : 0), 0);
   const main = shell(`<div class="toolbar"><h1>הגדרת ניקוד</h1><span class="spacer"></span>
     <button class="btn" id="add">+ סעיף</button></div>
-    <p class="sub">שינוי נקודות חל גם על ימים שכבר הוזנו. מקסימום שבועי בלי מבחנים: <strong>${weekly}</strong></p>
+    <p class="sub">שינוי נקודות חל גם על שבועות שכבר הוזנו. מקסימום שבועי בלי מבחנים: <strong>${weekly}</strong></p>
     <div class="card"><div class="table-wrap"><table><thead><tr><th>סעיף</th><th>סוג</th><th>מי מזין</th>
       <th class="num">נקודות</th><th>ימים</th><th class="num">פעיל</th><th></th></tr></thead><tbody>
       ${items.map(i => `<tr><td>${esc(i.name)}</td><td>${KIND[i.kind]}</td><td>${SHIFT[i.shift]}</td>
@@ -802,7 +809,7 @@ async function adminSettings() {
     <div class="card"><h2>כללי</h2><div class="form-row">
       <label class="field">שם המבצע<input type="text" id="name" value="${esc(s.program_name)}" style="width:240px"></label>
       <label class="field">יעד נקודות לתלמיד<input type="number" id="target" value="${s.target}" style="width:120px"></label>
-      <label class="field">ימים שמורה יכול לתקן אחורה<input type="number" id="edit" value="${s.edit_days}" min="0" style="width:120px"></label>
+      <label class="field">ימים אחרי סוף השבוע שמורה עדיין יכול לתקן<input type="number" id="edit" value="${s.edit_days}" min="0" style="width:120px"></label>
       <button class="btn" id="save">שמירה</button></div></div>
     <div class="card"><h2>לוגו המבצע</h2>
       <div class="form-row">${s.logo ? `<img class="logo-preview" src="${esc(s.logo)}">` : '<span class="muted">לא הועלה לוגו</span>'}

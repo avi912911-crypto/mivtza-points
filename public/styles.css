@@ -141,6 +141,8 @@ th.name { background: var(--surface-2); z-index: 2; }
   cursor: pointer; font-size: 18px; color: transparent; transition: all .12s;
 }
 .cell-toggle.on { background: var(--ok); border-color: var(--ok); color: #fff; }
+.cell-toggle.part { background: var(--primary-soft); border-color: var(--primary); color: var(--primary); }
+.cell-toggle { font-weight: 700; }
 .cell-toggle:disabled { cursor: default; opacity: .6; }
 .grade-input { width: 70px; text-align: center; }
 .grade-pts { font-size: 12px; color: var(--muted); margin-inline-start: 6px; }
