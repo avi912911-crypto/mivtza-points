@@ -438,6 +438,44 @@ app.get('/api/students/:id/card', wrap(req => {
   };
 }));
 
+// ---------- weekly report ----------
+
+// Points for the chosen week and the running total up to the end of that week.
+app.get('/api/report', wrap(req => {
+  const { perStudent, weeks, target } = computeTotals();
+  const week = weeks.find(w => w.start_date === req.query.week)
+    || progressInfo(weeks, target).current || weeks[weeks.length - 1] || null;
+  const own = req.user.role === 'teacher'
+    ? new Set(db.prepare('SELECT id FROM classes WHERE teacher_id = ?').all(req.user.id).map(c => c.id))
+    : null;
+  const groups = db.prepare('SELECT id, name, shift FROM classes ORDER BY shift DESC, sort, name').all()
+    .filter(c => !own || own.has(c.id));
+  const groupId = Number(req.query.class_id) || null;
+  const group = groupId ? groups.find(c => c.id === groupId) : null;
+  if (groupId && !group) fail(403, 'אין הרשאה לקבוצה זו');
+  const names = new Map(db.prepare('SELECT id, name FROM classes').all().map(c => [c.id, c.name]));
+
+  const students = db.prepare('SELECT * FROM students WHERE active = 1').all().filter(s => group
+    ? s[groupColumn(group)] === group.id
+    : !own || own.has(s.morning_class_id) || own.has(s.afternoon_class_id));
+  const ws = week?.start_date;
+  const rows = students.map(s => {
+    const st = perStudent.get(s.id) || { byWeek: {} };
+    const total = Object.entries(st.byWeek).filter(([d]) => !ws || d <= ws).reduce((a, [, p]) => a + p, 0);
+    return {
+      id: s.id, name: `${s.first_name} ${s.last_name}`.trim(),
+      morning: names.get(s.morning_class_id) || '', afternoon: names.get(s.afternoon_class_id) || '',
+      week: ws ? (st.byWeek[ws] || 0) : 0, total,
+      remaining_pct: Math.max(0, Math.round(100 * (target - total) / target)),
+    };
+  });
+  const active = weeks.filter(w => !w.vacation);
+  return {
+    week, week_number: week ? active.findIndex(w => w.start_date === week.start_date) + 1 : 0,
+    total_weeks: active.length, target, weeks, groups, group, rows,
+  };
+}));
+
 // ---------- bonuses (secretary + admin) ----------
 
 app.post('/api/bonuses', staff, wrap(req => {

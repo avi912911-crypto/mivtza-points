@@ -121,7 +121,7 @@ async function renderLogin() {
 // ---------- shell ----------
 
 function navLinks() {
-  const links = [['#/entry', 'הזנת נקודות'], ['#/dashboard', 'דשבורד']];
+  const links = [['#/entry', 'הזנת נקודות'], ['#/dashboard', 'דשבורד'], ['#/report', 'דוחות']];
   if (isStaff()) links.push(['#/admin/students', 'תלמידים'], ['#/admin/classes', 'קבוצות'], ['#/admin/weeks', 'לוח שבועות']);
   if (isAdmin()) links.push(['#/admin/users', 'משתמשים'], ['#/admin/items', 'הגדרת ניקוד'], ['#/admin/settings', 'הגדרות']);
   if (isStaff()) links.push(['#/admin/log', 'יומן שינויים']);
@@ -168,6 +168,7 @@ async function route() {
     if (page === 'dashboard') return await viewDashboard();
     if (page === 'class') return await viewClass(Number(arg));
     if (page === 'student') return await viewStudent(Number(arg));
+    if (page === 'report') return await viewReport();
     if (page === 'admin') return await viewAdmin(arg || 'students');
     return await viewEntry();
   } catch (err) {
@@ -419,6 +420,95 @@ async function viewStudent(id) {
     await api('/api/bonuses/' + b.dataset.del, { method: 'DELETE' });
     viewStudent(id);
   });
+}
+
+// ---------- weekly report ----------
+
+const REPORT_SORT = {
+  week: ['נקודות השבוע, מהגבוה לנמוך', (a, b) => b.week - a.week || b.total - a.total],
+  total: ['מצטבר מתחילת המבצע, מהגבוה לנמוך', (a, b) => b.total - a.total || b.week - a.week],
+  name: ['לפי שם', (a, b) => a.name.localeCompare(b.name, 'he')],
+};
+
+async function viewReport() {
+  const r = state.report ||= { sort: 'week' };
+  const q = new URLSearchParams();
+  if (r.week) q.set('week', r.week);
+  if (r.classId) q.set('class_id', r.classId);
+  const d = await api('/api/report?' + q);
+  r.week = d.week?.start_date || '';
+  const rows = [...d.rows].sort(REPORT_SORT[r.sort][1]);
+  const title = d.week ? `דוח שבועי · ${weekLabel(d.week)}` : 'דוח שבועי';
+  const range = d.week ? dateRange(d.week.start_date, addDays(d.week.start_date, 6)) : '';
+  const scope = d.group ? `${d.group.name} · ${SHIFT[d.group.shift]}` : 'כל התלמידים';
+  const avg = k => rows.length ? Math.round(rows.reduce((a, x) => a + x[k], 0) / rows.length) : 0;
+
+  const main = shell(`<h1>דוחות</h1><p class="sub">בחר שבוע וקבוצה, והורד את הדוח ל-PDF או לאקסל.</p>
+    <div class="card no-print"><div class="toolbar">
+      <select id="r-week">${d.weeks.map(w => `<option value="${w.start_date}" ${w.start_date === r.week ? 'selected' : ''}>
+        ${esc(weekLabel(w))} (${shortDate(w.start_date)})${w.vacation ? ' · חופשה' : ''}</option>`).join('')}</select>
+      <select id="r-group"><option value="">${state.me.role === 'teacher' ? 'כל התלמידים שלי' : 'כל התלמידים'}</option>
+        ${d.groups.map(c => `<option value="${c.id}" ${c.id === r.classId ? 'selected' : ''}>${esc(c.name)} · ${SHIFT[c.shift]}</option>`).join('')}</select>
+      <select id="r-sort">${Object.entries(REPORT_SORT).map(([k, [label]]) =>
+        `<option value="${k}" ${k === r.sort ? 'selected' : ''}>מיון: ${label}</option>`).join('')}</select>
+      <span class="spacer"></span>
+      <button class="btn" id="r-pdf">הורדת PDF</button>
+      <button class="btn secondary" id="r-xlsx">הורדת אקסל</button>
+      <button class="btn ghost" id="r-print">הדפסה</button>
+    </div></div>
+    <div class="card report-doc" id="report-doc">
+      <div class="report-head">
+        ${state.settings.logo ? `<img src="${esc(state.settings.logo)}" alt="לוגו">` : ''}
+        <div><div class="report-program">${esc(state.settings.program_name)}</div>
+          <h2>${esc(title)}</h2>
+          <div class="muted">${range}${d.week_number ? ` · שבוע ${d.week_number} מתוך ${d.total_weeks}` : ''} · ${esc(scope)}</div></div>
+      </div>
+      <div class="report-summary">
+        <span>תלמידים: <strong>${rows.length}</strong></span>
+        <span>ממוצע השבוע: <strong>${fmt(avg('week'))}</strong></span>
+        <span>ממוצע מצטבר: <strong>${fmt(avg('total'))}</strong></span>
+        <span>יעד: <strong>${fmt(d.target)}</strong></span>
+      </div>
+      <table class="report-table"><thead><tr><th class="num">#</th><th>שם התלמיד</th><th>קבוצת בוקר</th><th>קבוצת אחה"צ</th>
+        <th class="num">נקודות השבוע</th><th class="num">מצטבר מתחילת המבצע</th><th class="num">נשאר ליעד</th></tr></thead>
+      <tbody>${rows.map((x, i) => `<tr><td class="num">${i + 1}</td><td>${esc(x.name)}</td>
+        <td>${esc(x.morning)}</td><td>${esc(x.afternoon)}</td>
+        <td class="num"><strong>${fmt(x.week)}</strong></td><td class="num">${fmt(x.total)}</td>
+        <td class="num">${x.remaining_pct === 0 ? '<span class="badge gold">הגיע ליעד</span>'
+          : `<div class="pct"><div class="progress">${x.remaining_pct < 100 ? `<div style="width:${100 - x.remaining_pct}%"></div>` : ''}</div><span>${x.remaining_pct}%</span></div>`}</td></tr>`).join('')
+        || '<tr><td colspan="7" class="empty">אין תלמידים</td></tr>'}</tbody></table>
+      <div class="report-foot muted">הופק ב-${new Date().toLocaleDateString('he-IL')} · ${hebDate(state.today)}</div>
+    </div>`);
+
+  main.querySelector('#r-week').onchange = ev => { r.week = ev.target.value; viewReport(); };
+  main.querySelector('#r-group').onchange = ev => { r.classId = Number(ev.target.value) || null; viewReport(); };
+  main.querySelector('#r-sort').onchange = ev => { r.sort = ev.target.value; viewReport(); };
+  main.querySelector('#r-print').onclick = () => window.print();
+  const fileName = `${title} - ${scope}`.replace(/[\\/:*?"<>|·]/g, '').replace(/\s+/g, ' ').trim();
+
+  // The browser's own "Save as PDF" renders Hebrew correctly; the document title becomes the file name.
+  main.querySelector('#r-pdf').onclick = () => {
+    const prev = document.title;
+    document.title = fileName;
+    toast('בחלון שנפתח בחר "שמירה כ-PDF" ולחץ שמירה', 5000);
+    setTimeout(() => { window.print(); document.title = prev; }, 300);
+  };
+
+  main.querySelector('#r-xlsx').onclick = () => {
+    if (!window.XLSX) { toast('רכיב האקסל לא נטען. רענן את הדף.', 4000); return; }
+    const aoa = [
+      [state.settings.program_name], [title], [`${range} · ${scope}`], [],
+      ['#', 'שם התלמיד', 'קבוצת בוקר', 'קבוצת אחה"צ', 'נקודות השבוע', 'מצטבר מתחילת המבצע', 'נשאר ליעד (%)'],
+      ...rows.map((x, i) => [i + 1, x.name, x.morning, x.afternoon, x.week, x.total, x.remaining_pct]),
+    ];
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    ws['!cols'] = [{ wch: 5 }, { wch: 24 }, { wch: 16 }, { wch: 16 }, { wch: 13 }, { wch: 18 }, { wch: 14 }];
+    ws['!merges'] = [0, 1, 2].map(r => ({ s: { r, c: 0 }, e: { r, c: 6 } }));
+    const wb = XLSX.utils.book_new();
+    wb.Workbook = { Views: [{ RTL: true }] };
+    XLSX.utils.book_append_sheet(wb, ws, 'דוח');
+    XLSX.writeFile(wb, fileName + '.xlsx');
+  };
 }
 
 // ---------- admin ----------
