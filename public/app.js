@@ -122,7 +122,7 @@ async function renderLogin() {
 
 function navLinks() {
   const links = [['#/entry', 'הזנת נקודות'], ['#/dashboard', 'דשבורד']];
-  if (isStaff()) links.push(['#/admin/students', 'תלמידים'], ['#/admin/classes', 'כיתות'], ['#/admin/weeks', 'לוח שבועות']);
+  if (isStaff()) links.push(['#/admin/students', 'תלמידים'], ['#/admin/classes', 'קבוצות'], ['#/admin/weeks', 'לוח שבועות']);
   if (isAdmin()) links.push(['#/admin/users', 'משתמשים'], ['#/admin/items', 'הגדרת ניקוד'], ['#/admin/settings', 'הגדרות']);
   if (isStaff()) links.push(['#/admin/log', 'יומן שינויים']);
   return links;
@@ -192,7 +192,7 @@ async function viewEntry() {
   const { classes } = await api('/api/entry/classes');
   const e = state.entry;
   if (!classes.length) {
-    shell(`<h1>הזנת נקודות</h1><div class="card empty">עדיין לא שויכה אליך כיתה. פנה למנהל.</div>`);
+    shell(`<h1>הזנת נקודות</h1><div class="card empty">עדיין לא שויכה אליך קבוצה. פנה למנהל.</div>`);
     return;
   }
   if (!classes.find(c => c.id === e.classId)) e.classId = classes[0].id;
@@ -201,8 +201,8 @@ async function viewEntry() {
   const main = shell(`<h1>הזנת נקודות</h1><p class="sub">לחיצה על תא מסמנת או מבטלת. הכול נשמר אוטומטית.</p>
     <div class="card"><div class="toolbar">
       ${classes.length > 1 ? `<select id="cls">${classes.map(c =>
-        `<option value="${c.id}" ${c.id === e.classId ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>`
-        : `<strong>${esc(classes[0].name)}</strong>`}
+        `<option value="${c.id}" ${c.id === e.classId ? 'selected' : ''}>${esc(c.name)} · ${SHIFT[c.shift]}</option>`).join('')}</select>`
+        : `<strong>${esc(classes[0].name)} · ${SHIFT[classes[0].shift]}</strong>`}
       <div class="seg"><button data-mode="daily" class="${e.mode === 'daily' ? 'on' : ''}">יומי</button>
         <button data-mode="weekly" class="${e.mode === 'weekly' ? 'on' : ''}">שבועי ומבחנים</button></div>
       <div class="datebox"><button class="btn secondary small" id="prev">→</button>
@@ -242,7 +242,7 @@ async function loadGrid() {
       ? 'אין סעיפים יומיים להזנה ביום זה.' : 'אין סעיפים שבועיים שלך להזנה.'}</div>`;
     return;
   }
-  if (!data.students.length) { grid.innerHTML = notice + '<div class="empty">אין תלמידים בכיתה.</div>'; return; }
+  if (!data.students.length) { grid.innerHTML = notice + '<div class="empty">אין תלמידים בקבוצה.</div>'; return; }
 
   const readOnly = data.locked || data.future;
   const values = data.values;
@@ -332,20 +332,26 @@ async function viewDashboard() {
     </div>
     ${d.missing_today.length ? `<div class="card"><h2>עדיין לא הוזן היום</h2>
       ${d.missing_today.map(m => `<span class="badge bad" style="margin:3px">${esc(m.class_name)} · ${SHIFT[m.shift]}</span>`).join('')}</div>` : ''}
-    <div class="card"><h2>דירוג כיתות</h2>
-      ${d.classes.length ? `<div class="table-wrap"><table><thead><tr><th>#</th><th>כיתה</th><th class="num">תלמידים</th>
-        <th class="num">ממוצע השבוע</th><th class="num">ממוצע מצטבר</th><th class="num">בקצב</th><th>התקדמות ליעד</th></tr></thead><tbody>
-        ${d.classes.map((c, i) => `<tr style="cursor:pointer" onclick="location.hash='#/class/${c.id}'">
-          <td><span class="rank ${i === 0 ? 'r1' : ''}">${i + 1}</span></td><td><a href="#/class/${c.id}">${esc(c.name)}</a></td>
-          <td class="num">${c.students}</td><td class="num">${fmt(c.avg_week)}</td><td class="num"><strong>${fmt(c.avg_total)}</strong></td>
-          <td class="num">${c.on_track}/${c.students}</td>
-          <td style="min-width:140px"><div class="progress"><div style="width:${Math.min(100, Math.round(100 * c.avg_total / d.target))}%"></div></div></td></tr>`).join('')}
-        </tbody></table></div>` : '<div class="empty">אין עדיין כיתות</div>'}</div>
+    ${['morning', 'afternoon'].map(sh => groupRanking(d, sh)).join('')}
     <div class="grid grid-2">
       <div class="card"><h2>מצטייני השבוע</h2>${topList(d.top_week, 'week')}</div>
       <div class="card"><h2>מובילים מצטבר</h2>${topList(d.top_total, 'total')}</div>
     </div>`);
   return main;
+}
+
+function groupRanking(d, shift) {
+  const list = d.classes.filter(c => c.shift === shift);
+  if (!list.length) return '';
+  return `<div class="card"><h2>דירוג קבוצות ${SHIFT[shift]}</h2>
+    <div class="table-wrap"><table><thead><tr><th>#</th><th>קבוצה</th><th class="num">תלמידים</th>
+      <th class="num">ממוצע השבוע</th><th class="num">ממוצע מצטבר</th><th class="num">בקצב</th><th>התקדמות ליעד</th></tr></thead><tbody>
+      ${list.map((c, i) => `<tr style="cursor:pointer" onclick="location.hash='#/class/${c.id}'">
+        <td><span class="rank ${i === 0 ? 'r1' : ''}">${i + 1}</span></td><td><a href="#/class/${c.id}">${esc(c.name)}</a></td>
+        <td class="num">${c.students}</td><td class="num">${fmt(c.avg_week)}</td><td class="num"><strong>${fmt(c.avg_total)}</strong></td>
+        <td class="num">${c.on_track}/${c.students}</td>
+        <td style="min-width:140px"><div class="progress"><div style="width:${Math.min(100, Math.round(100 * c.avg_total / d.target))}%"></div></div></td></tr>`).join('')}
+    </tbody></table></div></div>`;
 }
 
 function topList(rows, key) {
@@ -361,7 +367,7 @@ async function viewClass(id) {
   const d = await api(`/api/classes/${id}/summary`);
   const weeks = d.weeks;
   const expected = d.expectedSoFar;
-  shell(`<a href="#/dashboard">→ חזרה לדשבורד</a><h1 style="margin-top:8px">${esc(d.class.name)}</h1>
+  shell(`<a href="#/dashboard">→ חזרה לדשבורד</a><h1 style="margin-top:8px">${esc(d.class.name)} · ${SHIFT[d.class.shift]}</h1>
     <p class="sub">נקודות לפי שבוע. יעד: ${fmt(d.target)} · צפוי עד עכשיו: ${fmt(expected)}</p>
     <div class="card"><div class="table-wrap"><table><thead><tr><th class="name">תלמיד</th>
       ${weeks.map(w => `<th class="num" title="${shortDate(w.start_date)}">${esc(w.parasha || shortDate(w.start_date))}${w.vacation ? '<br><span class="badge gold">חופשה</span>' : ''}</th>`).join('')}
@@ -382,9 +388,11 @@ async function viewStudent(id) {
   const pct = Math.min(100, Math.round(100 * d.total / d.target));
   const itemRows = d.items.filter(it => d.byItem[it.id]).map(it => [it.name, d.byItem[it.id]]);
   if (d.byItem.bonus) itemRows.push(['נקודות מיוחדות', d.byItem.bonus]);
-  const main = shell(`<a href="#/class/${d.student.class_id}">→ ${esc(d.student.class_name)}</a>
+  const groupLink = (gid, gname, sh) => gid ? `<a href="#/class/${gid}">${esc(gname)}</a> (${SHIFT[sh]})` : '';
+  const main = shell(`<a href="#/dashboard">→ חזרה לדשבורד</a>
     <h1 style="margin-top:8px">${esc(d.student.first_name)} ${esc(d.student.last_name)}</h1>
-    <p class="sub">${esc(d.student.class_name)}</p>
+    <p class="sub">${[groupLink(d.student.morning_class_id, d.student.morning_class_name, 'morning'),
+      groupLink(d.student.afternoon_class_id, d.student.afternoon_class_name, 'afternoon')].filter(Boolean).join(' · ')}</p>
     <div class="grid grid-2">
       <div class="card stat accent"><div class="label">סה"כ נקודות</div><div class="value">${fmt(d.total)} / ${fmt(d.target)}</div>
         <div class="progress gold" style="margin-top:12px;background:rgba(255,255,255,.25)"><div style="width:${pct}%"></div></div>
@@ -464,34 +472,36 @@ async function adminUsers() {
 async function adminClasses() {
   const [{ classes }, users] = await Promise.all([api('/api/admin/classes'), teachersList()]);
   const name = id => esc(users.find(u => u.id === id)?.display_name || '—');
-  const main = shell(`<div class="toolbar"><h1>כיתות</h1><span class="spacer"></span>
-    <button class="btn" id="add">+ כיתה חדשה</button></div>
-    <div class="card"><div class="table-wrap"><table><thead><tr><th>כיתה</th><th>מורה בוקר</th><th>מורה אחה"צ</th>
+  const main = shell(`<div class="toolbar"><h1>קבוצות</h1><span class="spacer"></span>
+    <button class="btn" id="add">+ קבוצה חדשה</button></div>
+    <p class="sub">לכל קבוצה מורה אחד, בבוקר או אחה"צ. לכל תלמיד יש קבוצת בוקר וקבוצת אחה"צ.</p>
+    <div class="card"><div class="table-wrap"><table><thead><tr><th>קבוצה</th><th>זמן</th><th>מורה</th>
       <th class="num">תלמידים</th><th></th></tr></thead><tbody>
-      ${classes.map(c => `<tr><td><a href="#/class/${c.id}">${esc(c.name)}</a></td><td>${name(c.morning_teacher_id)}</td>
-        <td>${name(c.afternoon_teacher_id)}</td><td class="num">${c.student_count}</td>
+      ${classes.map(c => `<tr><td><a href="#/class/${c.id}">${esc(c.name)}</a></td><td>${SHIFT[c.shift]}</td>
+        <td>${c.teacher_id ? name(c.teacher_id) : '<span class="badge bad">לא שויך מורה</span>'}</td><td class="num">${c.student_count}</td>
         <td><button class="btn secondary small" data-edit="${c.id}">עריכה</button>
         <button class="btn danger small" data-del="${c.id}">מחיקה</button></td></tr>`).join('')
-      || '<tr><td colspan="5" class="empty">אין כיתות. אפשר להוסיף ידנית או לייבא תלמידים מאקסל.</td></tr>'}
+      || '<tr><td colspan="5" class="empty">אין קבוצות. הן נוצרות לבד בייבוא תלמידים מאקסל.</td></tr>'}
     </tbody></table></div></div>`);
   const teacherOpts = sel => '<option value="">—</option>' + users.filter(u => u.role === 'teacher')
     .map(u => `<option value="${u.id}" ${u.id === sel ? 'selected' : ''}>${esc(u.display_name)}</option>`).join('');
-  const form = c => `<label class="field">שם כיתה<input type="text" name="name" value="${esc(c?.name)}" required></label>
-    <label class="field">מורה בוקר<select name="morning_teacher_id">${teacherOpts(c?.morning_teacher_id)}</select></label>
-    <label class="field">מורה אחה"צ<select name="afternoon_teacher_id">${teacherOpts(c?.afternoon_teacher_id)}</select></label>
+  const form = c => `<label class="field">שם הקבוצה<input type="text" name="name" value="${esc(c?.name)}" required></label>
+    <label class="field">זמן<select name="shift">${['morning', 'afternoon'].map(sh =>
+      `<option value="${sh}" ${(c?.shift || 'morning') === sh ? 'selected' : ''}>${SHIFT[sh]}</option>`).join('')}</select></label>
+    <label class="field">מורה<select name="teacher_id">${teacherOpts(c?.teacher_id)}</select></label>
     <label class="field">סדר תצוגה<input type="number" name="sort" value="${c?.sort ?? 0}"></label>`;
-  const body = d => ({ ...d, morning_teacher_id: Number(d.morning_teacher_id) || null, afternoon_teacher_id: Number(d.afternoon_teacher_id) || null });
-  main.querySelector('#add').onclick = () => openDialog('כיתה חדשה', form(null), async d => {
+  const body = d => ({ ...d, teacher_id: Number(d.teacher_id) || null });
+  main.querySelector('#add').onclick = () => openDialog('קבוצה חדשה', form(null), async d => {
     await api('/api/admin/classes', { body: body(d) }); adminClasses();
   });
   main.querySelectorAll('[data-edit]').forEach(b => b.onclick = () => {
     const c = classes.find(x => x.id === Number(b.dataset.edit));
-    openDialog('עריכת כיתה', form(c), async d => {
+    openDialog('עריכת קבוצה', form(c), async d => {
       await api('/api/admin/classes/' + c.id, { method: 'PUT', body: body(d) }); adminClasses();
     });
   });
   main.querySelectorAll('[data-del]').forEach(b => b.onclick = async () => {
-    if (!confirm('למחוק את הכיתה?')) return;
+    if (!confirm('למחוק את הקבוצה?')) return;
     try { await api('/api/admin/classes/' + b.dataset.del, { method: 'DELETE' }); adminClasses(); }
     catch (err) { alert(err.message); }
   });
@@ -503,37 +513,43 @@ async function adminStudents() {
     <button class="btn secondary" id="import">ייבוא מאקסל</button><button class="btn" id="add">+ תלמיד</button></div>
     <div class="card"><div class="toolbar">
       <input type="text" id="q" placeholder="חיפוש שם">
-      <select id="fc"><option value="">כל הכיתות</option>${classes.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select>
+      <select id="fc"><option value="">כל הקבוצות</option>${classes.map(c =>
+        `<option value="${c.id}">${esc(c.name)} · ${SHIFT[c.shift]}</option>`).join('')}</select>
       <label class="check"><input type="checkbox" id="inactive"> הצג לא פעילים</label>
       <span class="spacer"></span><span class="muted" id="count"></span></div>
-      <div class="table-wrap"><table><thead><tr><th>שם פרטי</th><th>שם משפחה</th><th>כיתה</th><th class="num">מצב</th><th></th></tr></thead>
+      <div class="table-wrap"><table><thead><tr><th>שם</th><th>קבוצת בוקר</th><th>קבוצת אחה"צ</th><th class="num">מצב</th><th></th></tr></thead>
       <tbody id="rows"></tbody></table></div></div>`);
   const draw = () => {
     const q = main.querySelector('#q').value.trim();
     const fc = Number(main.querySelector('#fc').value);
     const showInactive = main.querySelector('#inactive').checked;
-    const list = students.filter(s => (showInactive || s.active) && (!fc || s.class_id === fc)
+    const list = students.filter(s => (showInactive || s.active)
+      && (!fc || s.morning_class_id === fc || s.afternoon_class_id === fc)
       && (!q || `${s.first_name} ${s.last_name}`.includes(q)));
     main.querySelector('#count').textContent = `${list.length} תלמידים`;
-    main.querySelector('#rows').innerHTML = list.map(s => `<tr><td><a href="#/student/${s.id}">${esc(s.first_name)}</a></td>
-      <td>${esc(s.last_name)}</td><td>${esc(s.class_name || '—')}</td>
+    main.querySelector('#rows').innerHTML = list.map(s => `<tr>
+      <td><a href="#/student/${s.id}">${esc(s.first_name)} ${esc(s.last_name)}</a></td>
+      <td>${s.morning_class_name ? esc(s.morning_class_name) : '<span class="badge bad">חסר</span>'}</td>
+      <td>${s.afternoon_class_name ? esc(s.afternoon_class_name) : '<span class="badge bad">חסר</span>'}</td>
       <td class="num">${s.active ? '' : '<span class="badge bad">לא פעיל</span>'}</td>
       <td><button class="btn secondary small" data-edit="${s.id}">עריכה</button></td></tr>`).join('')
       || '<tr><td colspan="5" class="empty">אין תלמידים</td></tr>';
     main.querySelectorAll('[data-edit]').forEach(b => b.onclick = () => edit(students.find(s => s.id === Number(b.dataset.edit))));
   };
-  const classOpts = sel => '<option value="">—</option>' + classes.map(c =>
+  const groupOpts = (shift, sel) => '<option value="">—</option>' + classes.filter(c => c.shift === shift).map(c =>
     `<option value="${c.id}" ${c.id === sel ? 'selected' : ''}>${esc(c.name)}</option>`).join('');
-  const form = s => `<label class="field">שם פרטי<input type="text" name="first_name" value="${esc(s?.first_name)}" required></label>
-    <label class="field">שם משפחה<input type="text" name="last_name" value="${esc(s?.last_name)}"></label>
-    <label class="field">כיתה<select name="class_id">${classOpts(s?.class_id)}</select></label>
+  const form = s => `<label class="field">שם (למשל: כהן יוסף)<input type="text" name="first_name" value="${esc(s?.first_name)}" required></label>
+    <label class="field">שם נוסף (לא חובה)<input type="text" name="last_name" value="${esc(s?.last_name)}"></label>
+    <label class="field">קבוצת בוקר<select name="morning_class_id">${groupOpts('morning', s?.morning_class_id)}</select></label>
+    <label class="field">קבוצת אחה"צ<select name="afternoon_class_id">${groupOpts('afternoon', s?.afternoon_class_id)}</select></label>
     ${s ? `<label class="check"><input type="checkbox" name="active" ${s.active ? 'checked' : ''}> פעיל (הסרה מהרשימה שומרת את הנקודות)</label>` : ''}`;
+  const body = d => ({ ...d, morning_class_id: Number(d.morning_class_id) || null, afternoon_class_id: Number(d.afternoon_class_id) || null });
   const edit = s => openDialog('עריכת תלמיד', form(s), async d => {
-    await api('/api/admin/students/' + s.id, { method: 'PUT', body: { ...d, class_id: Number(d.class_id) || null, active: !!d.active } });
+    await api('/api/admin/students/' + s.id, { method: 'PUT', body: { ...body(d), active: !!d.active } });
     adminStudents();
   });
   main.querySelector('#add').onclick = () => openDialog('תלמיד חדש', form(null), async d => {
-    await api('/api/admin/students', { body: { ...d, class_id: Number(d.class_id) || null } }); adminStudents();
+    await api('/api/admin/students', { body: body(d) }); adminStudents();
   });
   main.querySelector('#import').onclick = importStudents;
   ['#q', '#fc', '#inactive'].forEach(sel => main.querySelector(sel).addEventListener('input', draw));
@@ -547,15 +563,13 @@ function importStudents() {
     <div id="map"></div>`, async () => {
     if (!dlg.rows) throw new Error('יש לבחור קובץ');
     const pick = n => Number(dlg.querySelector(`[name=${n}]`).value);
-    const [fi, li, ci] = [pick('c_first'), pick('c_last'), pick('c_class')];
-    const split = dlg.querySelector('[name=split]')?.checked;
-    const rows = dlg.rows.slice(1).map(r => {
-      let first = String(r[fi] ?? '').trim(), last = li >= 0 ? String(r[li] ?? '').trim() : '';
-      if (split && li < 0) { const parts = first.split(/\s+/); last = parts.pop() || ''; first = parts.join(' ') || last; if (first === last) last = ''; }
-      return { first_name: first, last_name: last, class_name: ci >= 0 ? String(r[ci] ?? '').trim() : '' };
-    }).filter(r => r.first_name);
+    const [fi, li, mi, ai] = [pick('c_first'), pick('c_last'), pick('c_morning'), pick('c_afternoon')];
+    const cell = (r, i) => i >= 0 ? String(r[i] ?? '').trim() : '';
+    const rows = dlg.rows.slice(1).map(r => ({
+      first_name: cell(r, fi), last_name: cell(r, li), morning_class: cell(r, mi), afternoon_class: cell(r, ai),
+    })).filter(r => r.first_name);
     const res = await api('/api/admin/students/import', { body: { rows } });
-    toast(`נוספו ${res.added} תלמידים ו-${res.new_classes} כיתות חדשות`, 4000);
+    toast(`נוספו ${res.added} תלמידים ו-${res.new_classes} קבוצות חדשות`, 4000);
     adminStudents();
   }, 'ייבוא');
   dlg.querySelector('#file').onchange = async ev => {
@@ -570,13 +584,13 @@ function importStudents() {
     const guess = re => head.findIndex(h => re.test(String(h)));
     const opts = (sel, allowNone) => (allowNone ? '<option value="-1">— אין —</option>' : '') +
       head.map((h, i) => `<option value="${i}" ${i === sel ? 'selected' : ''}>${esc(h || 'עמודה ' + (i + 1))}</option>`).join('');
-    const gf = guess(/פרטי|שם$/), gl = guess(/משפחה/), gc = guess(/כית|שיעור|קבוצ/);
+    const gf = guess(/שם/), gm = guess(/בוקר|סדר א/), ga = guess(/אחה|סדר ב/);
     dlg.querySelector('#map').innerHTML = `
-      <label class="field">עמודת שם פרטי (או שם מלא)<select name="c_first">${opts(gf >= 0 ? gf : 0)}</select></label>
-      <label class="field">עמודת שם משפחה<select name="c_last">${opts(gl, true)}</select></label>
-      <label class="check"><input type="checkbox" name="split"> אין עמודת משפחה: לפצל שם מלא (המילה האחרונה = משפחה)</label>
-      <label class="field">עמודת כיתה<select name="c_class">${opts(gc, true)}</select></label>
-      <p class="muted">נמצאו ${rows.length - 1} שורות. כיתות שלא קיימות ייווצרו אוטומטית.</p>`;
+      <label class="field">עמודת השם<select name="c_first">${opts(gf >= 0 ? gf : 0)}</select></label>
+      <label class="field">עמודת שם נוסף (אם השם מפוצל לשתי עמודות)<select name="c_last">${opts(-1, true)}</select></label>
+      <label class="field">עמודת קבוצת בוקר<select name="c_morning">${opts(gm, true)}</select></label>
+      <label class="field">עמודת קבוצת אחה"צ<select name="c_afternoon">${opts(ga, true)}</select></label>
+      <p class="muted">נמצאו ${rows.length - 1} תלמידים. קבוצות שלא קיימות ייווצרו לבד, וקבוצה ששמה זהה לשם של מורה במערכת תשויך אליו.</p>`;
   };
 }
 
@@ -737,7 +751,7 @@ async function adminSettings() {
 async function adminLog() {
   const { rows } = await api('/api/admin/audit');
   const ACT = { entry: 'הזנת נקודות', bonus: 'נקודות מיוחדות', 'bonus-delete': 'מחיקת נקודות מיוחדות', 'user-create': 'משתמש חדש',
-    'user-update': 'עדכון משתמש', 'class-create': 'כיתה חדשה', 'class-update': 'עדכון כיתה', 'class-delete': 'מחיקת כיתה',
+    'user-update': 'עדכון משתמש', 'class-create': 'קבוצה חדשה', 'class-update': 'עדכון קבוצה', 'class-delete': 'מחיקת קבוצה',
     'student-create': 'תלמיד חדש', 'student-update': 'עדכון תלמיד', 'student-import': 'ייבוא תלמידים', 'item-create': 'סעיף חדש',
     'item-update': 'עדכון סעיף', settings: 'הגדרות', 'weeks-generate': 'יצירת שבועות', 'week-update': 'עדכון שבוע', 'day-off': 'יום ללא לימודים' };
   const detail = d => {

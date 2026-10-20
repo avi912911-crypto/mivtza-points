@@ -95,6 +95,25 @@ CREATE TABLE IF NOT EXISTS settings (
 CREATE INDEX IF NOT EXISTS entries_date ON entries(date);
 `);
 
+// v2: a class ("group") belongs to one teacher and one shift, and each student has a
+// morning group and an afternoon group that can differ.
+function addColumn(table, column, def) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all().map(c => c.name);
+  if (!cols.includes(column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${def}`);
+    return true;
+  }
+  return false;
+}
+if (addColumn('classes', 'shift', "TEXT NOT NULL DEFAULT 'morning'")) {
+  db.exec('ALTER TABLE classes ADD COLUMN teacher_id INTEGER REFERENCES users(id) ON DELETE SET NULL');
+  db.exec('UPDATE classes SET teacher_id = morning_teacher_id');
+}
+if (addColumn('students', 'morning_class_id', 'INTEGER REFERENCES classes(id) ON DELETE SET NULL')) {
+  db.exec('ALTER TABLE students ADD COLUMN afternoon_class_id INTEGER REFERENCES classes(id) ON DELETE SET NULL');
+  db.exec('UPDATE students SET morning_class_id = class_id');
+}
+
 function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString('hex');
   const hash = crypto.scryptSync(password, salt, 64).toString('hex');
