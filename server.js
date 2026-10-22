@@ -276,10 +276,16 @@ function weekFor(date) {
   return db.prepare('SELECT * FROM weeks WHERE start_date = ?').get(weekStart(date)) || null;
 }
 
+// Groups a teacher may work with: their own, and those an admin added them to as an extra teacher.
+function teacherClassIds(userId) {
+  return new Set(db.prepare(`SELECT id FROM classes WHERE teacher_id = ?
+    UNION SELECT class_id FROM class_helpers WHERE user_id = ?`).all(userId, userId).map(r => r.id));
+}
+
 // Each group has one shift; office items (Friday/Shabbat) are open to staff and authorised teachers in every group.
 function shiftsFor(user, cls) {
   const out = [];
-  if (user.role !== 'teacher' || cls.teacher_id === user.id) out.push(cls.shift);
+  if (user.role !== 'teacher' || teacherClassIds(user.id).has(cls.id)) out.push(cls.shift);
   if (user.role !== 'teacher' || user.can_office) out.push('office');
   return out;
 }
@@ -489,7 +495,7 @@ app.get('/api/dashboard', wrap(req => {
   const { perStudent, weeks, target } = computeTotals();
   const info = progressInfo(weeks, target);
   const visible = req.user.role === 'teacher'
-    ? new Set(db.prepare('SELECT id FROM classes WHERE teacher_id = ?').all(req.user.id).map(c => c.id))
+    ? teacherClassIds(req.user.id)
     : null;
   const classes = db.prepare('SELECT * FROM classes ORDER BY shift DESC, sort, name').all()
     .filter(c => !visible || visible.has(c.id));
@@ -552,7 +558,7 @@ app.get('/api/dashboard', wrap(req => {
 function canSeeClass(user, classId) {
   if (user.role !== 'teacher') return true;
   const c = db.prepare('SELECT * FROM classes WHERE id = ?').get(classId);
-  return !!c && c.teacher_id === user.id;
+  return !!c && teacherClassIds(user.id).has(c.id);
 }
 
 app.get('/api/classes/:id/summary', wrap(req => {
@@ -594,7 +600,7 @@ app.get('/api/report', wrap(req => {
   const week = weeks.find(w => w.start_date === req.query.week)
     || progressInfo(weeks, target).current || weeks[weeks.length - 1] || null;
   const own = req.user.role === 'teacher'
-    ? new Set(db.prepare('SELECT id FROM classes WHERE teacher_id = ?').all(req.user.id).map(c => c.id))
+    ? teacherClassIds(req.user.id)
     : null;
   const groups = db.prepare('SELECT id, name, shift FROM classes ORDER BY shift DESC, sort, name').all()
     .filter(c => !own || own.has(c.id));
@@ -689,23 +695,32 @@ app.get('/api/admin/classes', wrap(req => {
   const rows = db.prepare(`SELECT c.*, (SELECT COUNT(*) FROM students s WHERE s.active = 1 AND
       (CASE c.shift WHEN 'afternoon' THEN s.afternoon_class_id ELSE s.morning_class_id END) = c.id) AS student_count
     FROM classes c ORDER BY shift DESC, sort, name`).all();
+  const helpers = db.prepare('SELECT class_id, user_id FROM class_helpers').all();
+  for (const c of rows) c.helpers = helpers.filter(h => h.class_id === c.id).map(h => h.user_id);
   return { classes: req.user.role === 'teacher' ? rows.filter(c => canSeeClass(req.user, c.id)) : rows };
 }));
 
 const SHIFTS = ['morning', 'afternoon'];
 
+function setHelpers(classId, helpers, mainTeacher) {
+  db.prepare('DELETE FROM class_helpers WHERE class_id = ?').run(classId);
+  const ins = db.prepare('INSERT OR IGNORE INTO class_helpers (class_id, user_id) VALUES (?, ?)');
+  for (const u of Array.isArray(helpers) ? helpers : []) if (Number(u) && Number(u) !== mainTeacher) ins.run(classId, Number(u));
+}
+
 app.post('/api/admin/classes', staff, wrap(req => {
-  const { name, shift, teacher_id, sort } = req.body || {};
+  const { name, shift, teacher_id, sort, helpers } = req.body || {};
   if (!name) fail(400, 'יש למלא שם קבוצה');
   if (!SHIFTS.includes(shift)) fail(400, 'יש לבחור בוקר או אחה"צ');
-  db.prepare('INSERT INTO classes (name, shift, teacher_id, sort) VALUES (?, ?, ?, ?)')
+  const r = db.prepare('INSERT INTO classes (name, shift, teacher_id, sort) VALUES (?, ?, ?, ?)')
     .run(name, shift, teacher_id || null, Number(sort) || 0);
+  setHelpers(Number(r.lastInsertRowid), helpers, teacher_id);
   audit(req.user.id, 'class-create', name);
   return { ok: true };
 }));
 
 app.put('/api/admin/classes/:id', staff, wrap(req => {
-  const { name, shift, teacher_id, sort } = req.body || {};
+  const { name, shift, teacher_id, sort, helpers } = req.body || {};
   const id = Number(req.params.id);
   const cur = db.prepare('SELECT * FROM classes WHERE id = ?').get(id);
   if (!cur) fail(404, 'קבוצה לא נמצאה');
@@ -715,6 +730,7 @@ app.put('/api/admin/classes/:id', staff, wrap(req => {
   }
   db.prepare('UPDATE classes SET name = ?, shift = ?, teacher_id = ?, sort = ? WHERE id = ?')
     .run(name, shift, teacher_id || null, Number(sort) || 0, id);
+  setHelpers(id, helpers, teacher_id);
   audit(req.user.id, 'class-update', name);
   return { ok: true };
 }));

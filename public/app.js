@@ -666,11 +666,12 @@ async function adminClasses() {
   const name = id => esc(users.find(u => u.id === id)?.display_name || '—');
   const main = shell(`<div class="toolbar"><h1>קבוצות</h1><span class="spacer"></span>
     <button class="btn" id="add">+ קבוצה חדשה</button></div>
-    <p class="sub">לכל קבוצה מורה אחד, בבוקר או אחה"צ. לכל תלמיד יש קבוצת בוקר וקבוצת אחה"צ.</p>
+    <p class="sub">לכל קבוצה מורה אחד, בבוקר או אחה"צ, ואפשר להוסיף מורים נוספים שיוכלו להזין לה נקודות. לכל תלמיד יש קבוצת בוקר וקבוצת אחה"צ.</p>
     <div class="card"><div class="table-wrap"><table><thead><tr><th>קבוצה</th><th>זמן</th><th>מורה</th>
       <th class="num">תלמידים</th><th></th></tr></thead><tbody>
       ${classes.map(c => `<tr><td><a href="#/class/${c.id}">${esc(c.name)}</a></td><td>${SHIFT[c.shift]}</td>
-        <td>${c.teacher_id ? name(c.teacher_id) : '<span class="badge bad">לא שויך מורה</span>'}</td><td class="num">${c.student_count}</td>
+        <td>${c.teacher_id ? name(c.teacher_id) : '<span class="badge bad">לא שויך מורה</span>'}${c.helpers?.length
+          ? `<div class="muted small">גם: ${c.helpers.map(name).join(', ')}</div>` : ''}</td><td class="num">${c.student_count}</td>
         <td><button class="btn secondary small" data-edit="${c.id}">עריכה</button>
         <button class="btn danger small" data-del="${c.id}">מחיקה</button></td></tr>`).join('')
       || '<tr><td colspan="5" class="empty">אין קבוצות. הן נוצרות לבד בייבוא תלמידים מאקסל.</td></tr>'}
@@ -681,8 +682,12 @@ async function adminClasses() {
     <label class="field">זמן<select name="shift">${['morning', 'afternoon'].map(sh =>
       `<option value="${sh}" ${(c?.shift || 'morning') === sh ? 'selected' : ''}>${SHIFT[sh]}</option>`).join('')}</select></label>
     <label class="field">מורה<select name="teacher_id">${teacherOpts(c?.teacher_id)}</select></label>
+    <div class="field">מורים נוספים שיכולים להזין נקודות לקבוצה<div class="form-row">${users.filter(u => u.role === 'teacher').map(u =>
+      `<label class="check"><input type="checkbox" name="h${u.id}" ${c?.helpers?.includes(u.id) ? 'checked' : ''}>${esc(u.display_name)}</label>`).join('')
+      || '<span class="muted">אין מורים במערכת</span>'}</div></div>
     <label class="field">סדר תצוגה<input type="number" name="sort" value="${c?.sort ?? 0}"></label>`;
-  const body = d => ({ ...d, teacher_id: Number(d.teacher_id) || null });
+  const body = d => ({ ...d, teacher_id: Number(d.teacher_id) || null,
+    helpers: Object.keys(d).filter(k => /^h\d+$/.test(k) && d[k]).map(k => Number(k.slice(1))) });
   main.querySelector('#add').onclick = () => openDialog('קבוצה חדשה', form(null), async d => {
     await api('/api/admin/classes', { body: body(d) }); adminClasses();
   });

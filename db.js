@@ -122,6 +122,12 @@ if (addColumn('items', 'general', 'INTEGER NOT NULL DEFAULT 0')) {
 }
 // v4: phone numbers for the points phone line (several allowed, separated by commas)
 addColumn('students', 'phone', "TEXT NOT NULL DEFAULT ''");
+// v5: extra teachers who may enter points for a group besides its own teacher
+db.exec(`CREATE TABLE IF NOT EXISTS class_helpers (
+  class_id INTEGER NOT NULL REFERENCES classes(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  PRIMARY KEY (class_id, user_id)
+)`);
 
 function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString('hex');
