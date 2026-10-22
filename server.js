@@ -197,6 +197,16 @@ function cleanPhones(v) {
   return [...new Set(String(v || '').split(/[,;/\n]|\s{2,}/).map(normPhone).filter(Boolean))].join(', ');
 }
 
+// A number may belong to one student only, so the line knows whose points to read.
+function checkPhonesFree(phones, exceptId) {
+  if (!phones) return;
+  const mine = phones.split(', ');
+  for (const s of db.prepare('SELECT id, first_name, last_name, phone FROM students WHERE active = 1 AND id != ?').all(exceptId || 0)) {
+    const dup = s.phone.split(',').map(x => x.trim()).find(x => mine.includes(x));
+    if (dup) fail(400, `המספר ${dup} כבר רשום אצל ${`${s.first_name} ${s.last_name}`.trim()}`);
+  }
+}
+
 function yemotToken() {
   let t = getSettings().yemot_token;
   if (!t) {
@@ -212,12 +222,13 @@ app.all('/yemot/points', express.urlencoded({ extended: false }), (req, res) => 
   const q = { ...req.query, ...(req.body || {}) };
   const say = parts => parts.map(p => 't-' + String(p).replace(/[.,&=\-"]/g, ' ').replace(/\s+/g, ' ').trim()).join('.');
   res.type('text/plain; charset=utf-8');
-  if (!q.token || q.token !== yemotToken()) return res.status(403).send('id_list_message=' + say(['אין הרשאה']) + '&hangup=yes');
+  try {
+  if (!q.token || q.token !== yemotToken()) return res.status(403).send('id_list_message=' + say(['אין הרשאה']) + '&go_to_folder=/hangup');
   const phone = normPhone(q.ApiPhone);
   const student = phone && db.prepare('SELECT * FROM students WHERE active = 1').all()
     .find(s => s.phone.split(',').map(x => x.trim()).includes(phone));
   if (!student) {
-    return res.send('id_list_message=' + say(['מספר הטלפון שממנו התקשרת לא רשום במערכת הנקודות', 'לרישום יש לפנות למזכירות']) + '&go_to_folder=/');
+    return res.send('id_list_message=' + say(['מספר הטלפון שממנו התקשרת לא רשום במערכת הנקודות', 'לרישום יש לפנות למזכירות']) + '&go_to_folder=/hangup');
   }
   const { perStudent, weeks, target } = computeTotals();
   const st = perStudent.get(student.id) || { total: 0, byWeek: {} };
@@ -228,7 +239,11 @@ app.all('/yemot/points', express.urlencoded({ extended: false }), (req, res) => 
   if (cur) parts.push(`השבוע צברת ${week} נקודות`);
   parts.push(left ? `נשארו לך ${left} נקודות כדי להגיע ליעד` : 'כל הכבוד הגעת ליעד');
   audit(null, 'phone-check', { student: student.id });
-  res.send('id_list_message=' + say(parts) + '&go_to_folder=/');
+  res.send('id_list_message=' + say(parts) + '&go_to_folder=/hangup');
+  } catch (e) {
+    console.error('yemot', e);
+    res.send('id_list_message=' + say(['אירעה תקלה', 'נא לנסות שוב מאוחר יותר']) + '&go_to_folder=/hangup');
+  }
 });
 
 app.use('/api', auth);
@@ -725,6 +740,7 @@ app.get('/api/admin/students', staff, wrap(() => ({
 app.post('/api/admin/students', staff, wrap(req => {
   const { first_name, last_name, morning_class_id, afternoon_class_id, phone } = req.body || {};
   if (!first_name) fail(400, 'יש למלא שם');
+  checkPhonesFree(cleanPhones(phone));
   db.prepare('INSERT INTO students (first_name, last_name, morning_class_id, afternoon_class_id, phone) VALUES (?, ?, ?, ?, ?)')
     .run(String(first_name).trim(), String(last_name || '').trim(), morning_class_id || null, afternoon_class_id || null, cleanPhones(phone));
   audit(req.user.id, 'student-create', `${first_name} ${last_name || ''}`);
@@ -733,6 +749,7 @@ app.post('/api/admin/students', staff, wrap(req => {
 
 app.put('/api/admin/students/:id', staff, wrap(req => {
   const { first_name, last_name, morning_class_id, afternoon_class_id, active, phone } = req.body || {};
+  checkPhonesFree(cleanPhones(phone), Number(req.params.id));
   db.prepare('UPDATE students SET first_name = ?, last_name = ?, morning_class_id = ?, afternoon_class_id = ?, active = ?, phone = ? WHERE id = ?')
     .run(String(first_name).trim(), String(last_name || '').trim(), morning_class_id || null, afternoon_class_id || null,
          active ? 1 : 0, cleanPhones(phone), Number(req.params.id));
