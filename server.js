@@ -224,7 +224,7 @@ app.all('/yemot/points', express.urlencoded({ extended: false }), (req, res) => 
   const cur = progressInfo(weeks, target).current;
   const week = cur ? (st.byWeek[cur.start_date] || 0) : 0;
   const left = Math.max(0, target - st.total);
-  const parts = [`שלום ${student.first_name} ${student.last_name}`.trim(), `צברת עד עכשיו ${st.total} נקודות`];
+  const parts = [`צברת עד עכשיו ${st.total} נקודות`];
   if (cur) parts.push(`השבוע צברת ${week} נקודות`);
   parts.push(left ? `נשארו לך ${left} נקודות כדי להגיע ליעד` : 'כל הכבוד הגעת ליעד');
   audit(null, 'phone-check', { student: student.id });
