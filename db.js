@@ -120,6 +120,8 @@ if (addColumn('students', 'morning_class_id', 'INTEGER REFERENCES classes(id) ON
 if (addColumn('items', 'general', 'INTEGER NOT NULL DEFAULT 0')) {
   db.exec(`UPDATE items SET general = 1, shift = 'office' WHERE name = 'שיחה יום ג''' OR name LIKE 'שיחה%'`);
 }
+// v4: phone numbers for the points phone line (several allowed, separated by commas)
+addColumn('students', 'phone', "TEXT NOT NULL DEFAULT ''");
 
 function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString('hex');

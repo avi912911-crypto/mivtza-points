@@ -709,7 +709,7 @@ async function adminStudents() {
         `<option value="${c.id}">${esc(c.name)} · ${SHIFT[c.shift]}</option>`).join('')}</select>
       <label class="check"><input type="checkbox" id="inactive"> הצג לא פעילים</label>
       <span class="spacer"></span><span class="muted" id="count"></span></div>
-      <div class="table-wrap"><table><thead><tr><th>שם</th><th>קבוצת בוקר</th><th>קבוצת אחה"צ</th><th class="num">מצב</th><th></th></tr></thead>
+      <div class="table-wrap"><table><thead><tr><th>שם</th><th>קבוצת בוקר</th><th>קבוצת אחה"צ</th><th>טלפון</th><th class="num">מצב</th><th></th></tr></thead>
       <tbody id="rows"></tbody></table></div></div>`);
   const draw = () => {
     const q = main.querySelector('#q').value.trim();
@@ -717,15 +717,16 @@ async function adminStudents() {
     const showInactive = main.querySelector('#inactive').checked;
     const list = students.filter(s => (showInactive || s.active)
       && (!fc || s.morning_class_id === fc || s.afternoon_class_id === fc)
-      && (!q || `${s.first_name} ${s.last_name}`.includes(q)));
+      && (!q || `${s.first_name} ${s.last_name} ${s.phone}`.includes(q)));
     main.querySelector('#count').textContent = `${list.length} תלמידים`;
     main.querySelector('#rows').innerHTML = list.map(s => `<tr>
       <td><a href="#/student/${s.id}">${esc(s.first_name)} ${esc(s.last_name)}</a></td>
       <td>${s.morning_class_name ? esc(s.morning_class_name) : '<span class="badge bad">חסר</span>'}</td>
       <td>${s.afternoon_class_name ? esc(s.afternoon_class_name) : '<span class="badge bad">חסר</span>'}</td>
+      <td dir="ltr" style="text-align:right">${esc(s.phone) || '<span class="muted">—</span>'}</td>
       <td class="num">${s.active ? '' : '<span class="badge bad">לא פעיל</span>'}</td>
       <td><button class="btn secondary small" data-edit="${s.id}">עריכה</button></td></tr>`).join('')
-      || '<tr><td colspan="5" class="empty">אין תלמידים</td></tr>';
+      || '<tr><td colspan="6" class="empty">אין תלמידים</td></tr>';
     main.querySelectorAll('[data-edit]').forEach(b => b.onclick = () => edit(students.find(s => s.id === Number(b.dataset.edit))));
   };
   const groupOpts = (shift, sel) => '<option value="">—</option>' + classes.filter(c => c.shift === shift).map(c =>
@@ -734,6 +735,7 @@ async function adminStudents() {
     <label class="field">שם נוסף (לא חובה)<input type="text" name="last_name" value="${esc(s?.last_name)}"></label>
     <label class="field">קבוצת בוקר<select name="morning_class_id">${groupOpts('morning', s?.morning_class_id)}</select></label>
     <label class="field">קבוצת אחה"צ<select name="afternoon_class_id">${groupOpts('afternoon', s?.afternoon_class_id)}</select></label>
+    <label class="field">טלפון לבדיקת נקודות בקו (כמה מספרים מפרידים בפסיק)<input type="tel" name="phone" dir="ltr" value="${esc(s?.phone)}"></label>
     ${s ? `<label class="check"><input type="checkbox" name="active" ${s.active ? 'checked' : ''}> פעיל (הסרה מהרשימה שומרת את הנקודות)</label>` : ''}`;
   const body = d => ({ ...d, morning_class_id: Number(d.morning_class_id) || null, afternoon_class_id: Number(d.afternoon_class_id) || null });
   const edit = s => openDialog('עריכת תלמיד', form(s), async d => {
@@ -755,13 +757,13 @@ function importStudents() {
     <div id="map"></div>`, async () => {
     if (!dlg.rows) throw new Error('יש לבחור קובץ');
     const pick = n => Number(dlg.querySelector(`[name=${n}]`).value);
-    const [fi, li, mi, ai] = [pick('c_first'), pick('c_last'), pick('c_morning'), pick('c_afternoon')];
+    const [fi, li, mi, ai, pi] = [pick('c_first'), pick('c_last'), pick('c_morning'), pick('c_afternoon'), pick('c_phone')];
     const cell = (r, i) => i >= 0 ? String(r[i] ?? '').trim() : '';
     const rows = dlg.rows.slice(1).map(r => ({
-      first_name: cell(r, fi), last_name: cell(r, li), morning_class: cell(r, mi), afternoon_class: cell(r, ai),
+      first_name: cell(r, fi), last_name: cell(r, li), morning_class: cell(r, mi), afternoon_class: cell(r, ai), phone: cell(r, pi),
     })).filter(r => r.first_name);
     const res = await api('/api/admin/students/import', { body: { rows } });
-    toast(`נוספו ${res.added} תלמידים ו-${res.new_classes} קבוצות חדשות`, 4000);
+    toast(`נוספו ${res.added} תלמידים ו-${res.new_classes} קבוצות חדשות${res.updated ? `, ועודכנו טלפונים ל-${res.updated} תלמידים קיימים` : ''}`, 5000);
     adminStudents();
   }, 'ייבוא');
   dlg.querySelector('#file').onchange = async ev => {
@@ -776,13 +778,15 @@ function importStudents() {
     const guess = re => head.findIndex(h => re.test(String(h)));
     const opts = (sel, allowNone) => (allowNone ? '<option value="-1">— אין —</option>' : '') +
       head.map((h, i) => `<option value="${i}" ${i === sel ? 'selected' : ''}>${esc(h || 'עמודה ' + (i + 1))}</option>`).join('');
-    const gf = guess(/שם/), gm = guess(/בוקר|סדר א/), ga = guess(/אחה|סדר ב/);
+    const gf = guess(/שם/), gm = guess(/בוקר|סדר א/), ga = guess(/אחה|סדר ב/), gp = guess(/טל|פלאפון|נייד|phone/i);
     dlg.querySelector('#map').innerHTML = `
       <label class="field">עמודת השם<select name="c_first">${opts(gf >= 0 ? gf : 0)}</select></label>
       <label class="field">עמודת שם נוסף (אם השם מפוצל לשתי עמודות)<select name="c_last">${opts(-1, true)}</select></label>
       <label class="field">עמודת קבוצת בוקר<select name="c_morning">${opts(gm, true)}</select></label>
       <label class="field">עמודת קבוצת אחה"צ<select name="c_afternoon">${opts(ga, true)}</select></label>
-      <p class="muted">נמצאו ${rows.length - 1} תלמידים. קבוצות שלא קיימות ייווצרו לבד, וקבוצה ששמה זהה לשם של מורה במערכת תשויך אליו.</p>`;
+      <label class="field">עמודת טלפון<select name="c_phone">${opts(gp, true)}</select></label>
+      <p class="muted">נמצאו ${rows.length - 1} תלמידים. קבוצות שלא קיימות ייווצרו לבד, וקבוצה ששמה זהה לשם של מורה במערכת תשויך אליו.
+        תלמיד שכבר קיים במערכת באותו שם לא ייווסף שוב, רק יעודכן לו הטלפון.</p>`;
   };
 }
 
@@ -907,8 +911,21 @@ async function adminSettings() {
       <div class="form-row">${s.logo ? `<img class="logo-preview" src="${esc(s.logo)}">` : '<span class="muted">לא הועלה לוגו</span>'}
         <input type="file" id="logo" accept="image/*">${s.logo ? '<button class="btn danger small" id="nologo">הסרה</button>' : ''}</div>
       <p class="muted">הלוגו יופיע בראש כל דף ובמסך הכניסה. מומלץ PNG עם רקע שקוף.</p></div>
+    <div class="card"><h2>קו טלפון לבדיקת נקודות (ימות המשיח)</h2>
+      <p class="muted">זו הכתובת שמגדירים בשלוחת API בימות המשיח. התלמיד מתקשר, והמערכת מזהה אותו לפי הטלפון הרשום אצלו ומקריאה לו את הנקודות. אל תפרסם את הכתובת.</p>
+      <div class="form-row"><input type="text" id="yemot" dir="ltr" readonly style="width:100%;max-width:560px" value="טוען...">
+        <button class="btn secondary small" id="ycopy">העתקה</button>
+        <button class="btn ghost small" id="ynew">יצירת כתובת חדשה</button></div></div>
     <div class="card"><h2>גיבוי</h2><p class="muted">המערכת שומרת גיבוי אוטומטי כל יום (14 הימים האחרונים). אפשר גם להוריד עותק למחשב.</p>
       <a class="btn secondary" href="/api/admin/backup">הורדת גיבוי</a></div>`);
+  const yemotInput = main.querySelector('#yemot');
+  const showYemot = t => { yemotInput.value = `${location.origin}/yemot/points?token=${t}`; };
+  api('/api/admin/yemot').then(r => showYemot(r.token));
+  main.querySelector('#ycopy').onclick = () => { navigator.clipboard?.writeText(yemotInput.value); yemotInput.select(); toast('הכתובת הועתקה'); };
+  main.querySelector('#ynew').onclick = async () => {
+    if (!confirm('הכתובת הקודמת תפסיק לעבוד, וצריך יהיה לעדכן אותה בימות המשיח. להמשיך?')) return;
+    showYemot((await api('/api/admin/yemot/regenerate', { body: {} })).token);
+  };
   main.querySelector('#save').onclick = async () => {
     const body = { program_name: main.querySelector('#name').value, target: main.querySelector('#target').value,
                    edit_days: main.querySelector('#edit').value };
@@ -943,7 +960,7 @@ async function adminSettings() {
 
 async function adminLog() {
   const { rows } = await api('/api/admin/audit');
-  const ACT = { entry: 'הזנת נקודות', bonus: 'נקודות מיוחדות', 'bonus-delete': 'מחיקת נקודות מיוחדות', 'user-create': 'משתמש חדש',
+  const ACT = { entry: 'הזנת נקודות', 'phone-check': 'בדיקת נקודות בטלפון', bonus: 'נקודות מיוחדות', 'bonus-delete': 'מחיקת נקודות מיוחדות', 'user-create': 'משתמש חדש',
     'user-update': 'עדכון משתמש', 'class-create': 'קבוצה חדשה', 'class-update': 'עדכון קבוצה', 'class-delete': 'מחיקת קבוצה',
     'student-create': 'תלמיד חדש', 'student-update': 'עדכון תלמיד', 'student-import': 'ייבוא תלמידים', 'item-create': 'סעיף חדש',
     'item-update': 'עדכון סעיף', settings: 'הגדרות', 'weeks-generate': 'יצירת שבועות', 'week-update': 'עדכון שבוע', 'day-off': 'יום ללא לימודים' };

@@ -184,6 +184,53 @@ app.post('/api/logout', wrap((req, res) => {
   return { ok: true };
 }));
 
+// ---------- phone line (Yemot HaMashiach API extension) ----------
+
+// Israeli numbers in any form (+972-50..., 050-...) become 05.... Several numbers are kept comma-separated.
+function normPhone(p) {
+  let d = String(p || '').replace(/\D/g, '');
+  if (d.startsWith('972')) d = '0' + d.slice(3);
+  if (d && !d.startsWith('0')) d = '0' + d;
+  return d.length >= 9 ? d : '';
+}
+function cleanPhones(v) {
+  return [...new Set(String(v || '').split(/[,;/\n]|\s{2,}/).map(normPhone).filter(Boolean))].join(', ');
+}
+
+function yemotToken() {
+  let t = getSettings().yemot_token;
+  if (!t) {
+    t = crypto.randomBytes(12).toString('hex');
+    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('yemot_token', ?)").run(t);
+  }
+  return t;
+}
+
+// Yemot calls this with the caller's number (ApiPhone) and reads the answer aloud.
+// The reply is Yemot's API text format: parts separated by '.', 't-' = text to speech.
+app.all('/yemot/points', express.urlencoded({ extended: false }), (req, res) => {
+  const q = { ...req.query, ...(req.body || {}) };
+  const say = parts => parts.map(p => 't-' + String(p).replace(/[.,&=\-"]/g, ' ').replace(/\s+/g, ' ').trim()).join('.');
+  res.type('text/plain; charset=utf-8');
+  if (!q.token || q.token !== yemotToken()) return res.status(403).send('id_list_message=' + say(['אין הרשאה']) + '&hangup=yes');
+  const phone = normPhone(q.ApiPhone);
+  const student = phone && db.prepare('SELECT * FROM students WHERE active = 1').all()
+    .find(s => s.phone.split(',').map(x => x.trim()).includes(phone));
+  if (!student) {
+    return res.send('id_list_message=' + say(['מספר הטלפון שממנו התקשרת לא רשום במערכת הנקודות', 'לרישום יש לפנות למזכירות']) + '&go_to_folder=/');
+  }
+  const { perStudent, weeks, target } = computeTotals();
+  const st = perStudent.get(student.id) || { total: 0, byWeek: {} };
+  const cur = progressInfo(weeks, target).current;
+  const week = cur ? (st.byWeek[cur.start_date] || 0) : 0;
+  const left = Math.max(0, target - st.total);
+  const parts = [`שלום ${student.first_name} ${student.last_name}`.trim(), `צברת עד עכשיו ${st.total} נקודות`];
+  if (cur) parts.push(`השבוע צברת ${week} נקודות`);
+  parts.push(left ? `נשארו לך ${left} נקודות כדי להגיע ליעד` : 'כל הכבוד הגעת ליעד');
+  audit(null, 'phone-check', { student: student.id });
+  res.send('id_list_message=' + say(parts) + '&go_to_folder=/');
+});
+
 app.use('/api', auth);
 
 app.get('/api/me', wrap(req => {
@@ -676,25 +723,26 @@ app.get('/api/admin/students', staff, wrap(() => ({
 })));
 
 app.post('/api/admin/students', staff, wrap(req => {
-  const { first_name, last_name, morning_class_id, afternoon_class_id } = req.body || {};
+  const { first_name, last_name, morning_class_id, afternoon_class_id, phone } = req.body || {};
   if (!first_name) fail(400, 'יש למלא שם');
-  db.prepare('INSERT INTO students (first_name, last_name, morning_class_id, afternoon_class_id) VALUES (?, ?, ?, ?)')
-    .run(String(first_name).trim(), String(last_name || '').trim(), morning_class_id || null, afternoon_class_id || null);
+  db.prepare('INSERT INTO students (first_name, last_name, morning_class_id, afternoon_class_id, phone) VALUES (?, ?, ?, ?, ?)')
+    .run(String(first_name).trim(), String(last_name || '').trim(), morning_class_id || null, afternoon_class_id || null, cleanPhones(phone));
   audit(req.user.id, 'student-create', `${first_name} ${last_name || ''}`);
   return { ok: true };
 }));
 
 app.put('/api/admin/students/:id', staff, wrap(req => {
-  const { first_name, last_name, morning_class_id, afternoon_class_id, active } = req.body || {};
-  db.prepare('UPDATE students SET first_name = ?, last_name = ?, morning_class_id = ?, afternoon_class_id = ?, active = ? WHERE id = ?')
+  const { first_name, last_name, morning_class_id, afternoon_class_id, active, phone } = req.body || {};
+  db.prepare('UPDATE students SET first_name = ?, last_name = ?, morning_class_id = ?, afternoon_class_id = ?, active = ?, phone = ? WHERE id = ?')
     .run(String(first_name).trim(), String(last_name || '').trim(), morning_class_id || null, afternoon_class_id || null,
-         active ? 1 : 0, Number(req.params.id));
+         active ? 1 : 0, cleanPhones(phone), Number(req.params.id));
   audit(req.user.id, 'student-update', `${first_name} ${last_name || ''}`);
   return { ok: true };
 }));
 
-// rows: [{ first_name, last_name, morning_class, afternoon_class }]. Unknown groups are created,
+// rows: [{ first_name, last_name, morning_class, afternoon_class, phone }]. Unknown groups are created,
 // and a group named exactly like a teacher's display name is linked to that teacher.
+// A row whose name matches an existing student only fills in that student's phone, so a list can be re-imported.
 app.post('/api/admin/students/import', staff, wrap(req => {
   const rows = (req.body || {}).rows;
   if (!Array.isArray(rows) || !rows.length) fail(400, 'אין שורות לייבוא');
@@ -702,8 +750,11 @@ app.post('/api/admin/students/import', staff, wrap(req => {
   const teachers = new Map(db.prepare("SELECT id, display_name FROM users WHERE role = 'teacher'").all()
     .map(u => [u.display_name.trim(), u.id]));
   const insGroup = db.prepare('INSERT INTO classes (name, shift, teacher_id) VALUES (?, ?, ?)');
-  const insStudent = db.prepare('INSERT INTO students (first_name, last_name, morning_class_id, afternoon_class_id) VALUES (?, ?, ?, ?)');
-  let added = 0, newGroups = 0;
+  const insStudent = db.prepare('INSERT INTO students (first_name, last_name, morning_class_id, afternoon_class_id, phone) VALUES (?, ?, ?, ?, ?)');
+  const existing = new Map(db.prepare('SELECT id, first_name, last_name FROM students').all()
+    .map(s => [`${s.first_name} ${s.last_name}`.replace(/\s+/g, ' ').trim(), s.id]));
+  const setPhone = db.prepare('UPDATE students SET phone = ? WHERE id = ?');
+  let added = 0, newGroups = 0, updated = 0;
   const groupId = (name, shift) => {
     name = String(name || '').trim();
     if (!name) return null;
@@ -719,8 +770,14 @@ app.post('/api/admin/students/import', staff, wrap(req => {
     for (const r of rows) {
       const first = String(r.first_name || '').trim();
       if (!first) continue;
-      insStudent.run(first, String(r.last_name || '').trim(),
-        groupId(r.morning_class, 'morning'), groupId(r.afternoon_class, 'afternoon'));
+      const last = String(r.last_name || '').trim();
+      const phone = cleanPhones(r.phone);
+      const known = existing.get(`${first} ${last}`.replace(/\s+/g, ' ').trim());
+      if (known) {
+        if (phone) { setPhone.run(phone, known); updated++; }
+        continue;
+      }
+      insStudent.run(first, last, groupId(r.morning_class, 'morning'), groupId(r.afternoon_class, 'afternoon'), phone);
       added++;
     }
     db.exec('COMMIT');
@@ -728,8 +785,15 @@ app.post('/api/admin/students/import', staff, wrap(req => {
     db.exec('ROLLBACK');
     throw e;
   }
-  audit(req.user.id, 'student-import', { added, newGroups });
-  return { added, new_classes: newGroups };
+  audit(req.user.id, 'student-import', { added, newGroups, updated });
+  return { added, new_classes: newGroups, updated };
+}));
+
+app.get('/api/admin/yemot', adminOnly, wrap(() => ({ token: yemotToken() })));
+app.post('/api/admin/yemot/regenerate', adminOnly, wrap(req => {
+  db.prepare("DELETE FROM settings WHERE key = 'yemot_token'").run();
+  audit(req.user.id, 'settings', 'yemot_token');
+  return { token: yemotToken() };
 }));
 
 // ---------- admin: scoring items + settings ----------
