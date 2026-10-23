@@ -777,8 +777,9 @@ app.put('/api/admin/students/:id', staff, wrap(req => {
 // and a group named exactly like a teacher's display name is linked to that teacher.
 // A row whose name matches an existing student only fills in that student's phone, so a list can be re-imported.
 app.post('/api/admin/students/import', staff, wrap(req => {
-  const rows = (req.body || {}).rows;
+  const { rows, phones_only } = req.body || {};
   if (!Array.isArray(rows) || !rows.length) fail(400, 'אין שורות לייבוא');
+  const notFound = [];
   const groups = new Map(db.prepare('SELECT id, name, shift FROM classes').all().map(c => [`${c.shift}:${c.name.trim()}`, c.id]));
   const teachers = new Map(db.prepare("SELECT id, display_name FROM users WHERE role = 'teacher'").all()
     .map(u => [u.display_name.trim(), u.id]));
@@ -807,9 +808,10 @@ app.post('/api/admin/students/import', staff, wrap(req => {
       const phone = cleanPhones(r.phone);
       const known = existing.get(`${first} ${last}`.replace(/\s+/g, ' ').trim());
       if (known) {
-        if (phone) { setPhone.run(phone, known); updated++; }
+        if (phone) { checkPhonesFree(phone, known); setPhone.run(phone, known); updated++; }
         continue;
       }
+      if (phones_only) { notFound.push(`${first} ${last}`.trim()); continue; }
       insStudent.run(first, last, groupId(r.morning_class, 'morning'), groupId(r.afternoon_class, 'afternoon'), phone);
       added++;
     }
@@ -819,7 +821,7 @@ app.post('/api/admin/students/import', staff, wrap(req => {
     throw e;
   }
   audit(req.user.id, 'student-import', { added, newGroups, updated });
-  return { added, new_classes: newGroups, updated };
+  return { added, new_classes: newGroups, updated, not_found: notFound };
 }));
 
 app.get('/api/admin/yemot', adminOnly, wrap(() => ({ token: yemotToken() })));

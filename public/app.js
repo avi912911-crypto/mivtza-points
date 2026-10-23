@@ -767,9 +767,16 @@ function importStudents() {
     const rows = dlg.rows.slice(1).map(r => ({
       first_name: cell(r, fi), last_name: cell(r, li), morning_class: cell(r, mi), afternoon_class: cell(r, ai), phone: cell(r, pi),
     })).filter(r => r.first_name);
-    const res = await api('/api/admin/students/import', { body: { rows } });
-    toast(`נוספו ${res.added} תלמידים ו-${res.new_classes} קבוצות חדשות${res.updated ? `, ועודכנו טלפונים ל-${res.updated} תלמידים קיימים` : ''}`, 5000);
+    const phonesOnly = !!dlg.querySelector('[name=phones_only]')?.checked;
+    const res = await api('/api/admin/students/import', { body: { rows, phones_only: phonesOnly } });
     adminStudents();
+    if (phonesOnly) {
+      openDialog('עדכון טלפונים', `<p>עודכנו טלפונים ל-<strong>${res.updated}</strong> תלמידים.</p>${res.not_found.length
+        ? `<p>השמות האלה לא נמצאו במערכת, ולא נוספו (אפשר להוסיף להם טלפון ביד בעריכת תלמיד):</p><p class="muted">${res.not_found.map(esc).join('<br>')}</p>` : ''}`,
+        async () => {}, 'סגירה');
+    } else {
+      toast(`נוספו ${res.added} תלמידים ו-${res.new_classes} קבוצות חדשות${res.updated ? `, ועודכנו טלפונים ל-${res.updated} תלמידים קיימים` : ''}`, 5000);
+    }
   }, 'ייבוא');
   dlg.querySelector('#file').onchange = async ev => {
     const file = ev.target.files[0];
@@ -790,6 +797,7 @@ function importStudents() {
       <label class="field">עמודת קבוצת בוקר<select name="c_morning">${opts(gm, true)}</select></label>
       <label class="field">עמודת קבוצת אחה"צ<select name="c_afternoon">${opts(ga, true)}</select></label>
       <label class="field">עמודת טלפון<select name="c_phone">${opts(gp, true)}</select></label>
+      <label class="check"><input type="checkbox" name="phones_only"> רק לעדכן טלפונים לתלמידים שכבר קיימים (לא להוסיף תלמידים חדשים)</label>
       <p class="muted">נמצאו ${rows.length - 1} תלמידים. קבוצות שלא קיימות ייווצרו לבד, וקבוצה ששמה זהה לשם של מורה במערכת תשויך אליו.
         תלמיד שכבר קיים במערכת באותו שם לא ייווסף שוב, רק יעודכן לו הטלפון.</p>`;
   };
