@@ -7,7 +7,8 @@ const { db, DB_PATH, STORAGE_TEMPORARY, hashPassword, checkPassword, getSettings
 const app = express();
 app.set('trust proxy', 1);
 app.use(express.json({ limit: '5mb' }));
-app.use(express.static(path.join(__dirname, 'public')));
+// no-cache: browsers re-check (cheaply, by ETag) so an update shows up without a hard refresh
+app.use(express.static(path.join(__dirname, 'public'), { setHeaders: res => res.set('Cache-Control', 'no-cache') }));
 
 const SESSION_DAYS = 30;
 const PARASHOT = [
