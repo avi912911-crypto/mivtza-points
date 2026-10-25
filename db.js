@@ -133,6 +133,21 @@ db.exec(`CREATE TABLE IF NOT EXISTS class_helpers (
 if (addColumn('students', 'registered', 'INTEGER NOT NULL DEFAULT 0')) {
   db.exec("UPDATE items SET general = 1 WHERE shift = 'office'");
 }
+// v7: daily attendance, one row per student, daily item and day. A missing row means absent.
+// The weekly count in entries is derived from the 'present' rows (see syncCount in server.js).
+// source: teacher = entered on the weekly screen, camera = the tablet, legacy = spread from an old weekly count
+db.exec(`CREATE TABLE IF NOT EXISTS attendance (
+  student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+  date TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('present','late')),
+  source TEXT NOT NULL DEFAULT 'teacher' CHECK (source IN ('teacher','camera','legacy')),
+  at TEXT,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (student_id, item_id, date)
+)`);
+db.exec('CREATE INDEX IF NOT EXISTS attendance_date ON attendance(date)');
 
 function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString('hex');

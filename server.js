@@ -82,6 +82,43 @@ function migrateToWeeklyCounts() {
 }
 migrateToWeeklyCounts();
 
+function weekDaysOff(key) {
+  return new Set(db.prepare('SELECT date FROM days_off WHERE date BETWEEN ? AND ?').all(key, addDays(key, 6)).map(d => d.date));
+}
+
+// The days of the given week an item takes place on, with days off marked.
+function itemDates(item, ws, daysOff) {
+  return item.days.split(',').filter(Boolean).map(d => addDays(ws, Number(d)))
+    .map(date => ({ date, off: daysOff.has(date) }));
+}
+
+// Daily attendance (v7) replaced the weekly counts as what teachers enter. Counts entered before
+// that are spread once over the item's first study days of their week, so every week shows days.
+// The counts themselves, and so the points, stay exactly as they were.
+function spreadLegacyCounts() {
+  if (getSettings().attendance_mode === 'daily') return;
+  const rows = db.prepare(`SELECT e.*, i.days FROM entries e JOIN items i ON i.id = e.item_id
+    WHERE i.kind = 'daily' AND NOT EXISTS (SELECT 1 FROM attendance a WHERE a.student_id = e.student_id
+      AND a.item_id = e.item_id AND a.date BETWEEN e.date AND date(e.date, '+6 days'))`).all();
+  const ins = db.prepare(`INSERT OR IGNORE INTO attendance (student_id, item_id, date, status, source, updated_by, updated_at)
+    VALUES (?, ?, ?, 'present', 'legacy', ?, ?)`);
+  db.exec('BEGIN');
+  try {
+    for (const r of rows) {
+      const ws = weekStart(r.date);
+      const open = itemDates(r, ws, weekDaysOff(ws)).filter(d => !d.off);
+      for (const d of open.slice(0, r.value)) ins.run(r.student_id, r.item_id, d.date, r.updated_by, r.updated_at);
+    }
+    db.prepare(`INSERT OR REPLACE INTO settings (key, value) VALUES ('attendance_mode', 'daily')`).run();
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+  if (rows.length) console.log(`Spread ${rows.length} weekly counts into daily attendance`);
+}
+spreadLegacyCounts();
+
 // How many study days of the week an item can be attended on (its weekdays, minus days off).
 function maxCount(item, ws, daysOff) {
   return item.days.split(',').filter(Boolean)
@@ -331,13 +368,11 @@ function entryContext(req, classId, date) {
 // Active items with the most a student can get in the given week
 function weekItems(key, daysOff) {
   return db.prepare('SELECT * FROM items WHERE active = 1 ORDER BY sort, id').all()
-    .map(it => ({ ...it, max: it.kind === 'daily' ? maxCount(it, key, daysOff) : it.kind === 'weekly' ? 1 : 100 }))
+    .map(it => ({ ...it, max: it.kind === 'daily' ? maxCount(it, key, daysOff) : it.kind === 'weekly' ? 1 : 100,
+                  dates: it.kind === 'daily' ? itemDates(it, key, daysOff) : undefined }))
     .filter(it => it.max > 0);
 }
 
-function weekDaysOff(key) {
-  return new Set(db.prepare('SELECT date FROM days_off WHERE date BETWEEN ? AND ?').all(key, addDays(key, 6)).map(d => d.date));
-}
 
 function readValues(key, items, students) {
   const values = {};
@@ -351,6 +386,31 @@ function readValues(key, items, students) {
   return values;
 }
 
+// Daily items: att['student:item'] = { date: [status, source] }
+function readAttendance(key, items, students) {
+  const att = {};
+  const daily = items.filter(i => i.kind === 'daily');
+  if (daily.length && students.length) {
+    const rows = db.prepare(`SELECT student_id, item_id, date, status, source FROM attendance
+      WHERE date BETWEEN ? AND ? AND item_id IN (${daily.map(() => '?').join(',')})
+      AND student_id IN (${students.map(() => '?').join(',')})`)
+      .all(key, addDays(key, 6), ...daily.map(i => i.id), ...students.map(s => s.id));
+    for (const r of rows) (att[`${r.student_id}:${r.item_id}`] ??= {})[r.date] = [r.status, r.source];
+  }
+  return att;
+}
+
+// The weekly count of a daily item = the days marked present (late gives no points).
+function syncCount(studentId, itemId, key, userId, now) {
+  const n = db.prepare(`SELECT COUNT(*) AS n FROM attendance WHERE student_id = ? AND item_id = ?
+    AND date BETWEEN ? AND ? AND status = 'present'`).get(studentId, itemId, key, addDays(key, 6)).n;
+  if (!n) db.prepare('DELETE FROM entries WHERE student_id = ? AND item_id = ? AND date = ?').run(studentId, itemId, key);
+  else db.prepare(`INSERT INTO entries (student_id, item_id, date, value, updated_by, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (student_id, item_id, date)
+    DO UPDATE SET value = excluded.value, updated_by = excluded.updated_by, updated_at = excluded.updated_at`)
+    .run(studentId, itemId, key, n, userId, now);
+}
+
 function saveChanges(user, items, studentIds, key, changes) {
   if (!Array.isArray(changes)) fail(400, 'נתונים חסרים');
   const allowedItems = new Map(items.map(i => [i.id, i]));
@@ -358,13 +418,27 @@ function saveChanges(user, items, studentIds, key, changes) {
     VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (student_id, item_id, date)
     DO UPDATE SET value = excluded.value, updated_by = excluded.updated_by, updated_at = excluded.updated_at`);
   const del = db.prepare('DELETE FROM entries WHERE student_id = ? AND item_id = ? AND date = ?');
+  const setDay = db.prepare(`INSERT INTO attendance (student_id, item_id, date, status, source, updated_by, updated_at)
+    VALUES (?, ?, ?, ?, 'teacher', ?, ?) ON CONFLICT (student_id, item_id, date)
+    DO UPDATE SET status = excluded.status, source = 'teacher', updated_by = excluded.updated_by, updated_at = excluded.updated_at`);
+  const clearDay = db.prepare('DELETE FROM attendance WHERE student_id = ? AND item_id = ? AND date = ?');
+  const touched = new Map();
   const now = new Date().toISOString();
+  const t = today();
   db.exec('BEGIN');
   try {
     for (const c of changes) {
       const item = allowedItems.get(Number(c.item_id));
       if (!item || !studentIds.has(Number(c.student_id))) fail(400, 'שינוי לא מורשה');
-      if (c.value === null || c.value === '' || c.value === 0 && item.kind !== 'exam') {
+      if (item.kind === 'daily') {
+        // A page loaded before daily attendance sends counts; it has to be reloaded.
+        if (!item.dates.some(d => d.date === c.date && !d.off)) fail(400, 'יש לרענן את הדף (ריענון: F5)');
+        if (c.date > t) fail(400, 'אי אפשר לסמן יום שעוד לא הגיע');
+        if (c.status === 'present' || c.status === 'late') setDay.run(c.student_id, item.id, c.date, c.status, user.id, now);
+        else if (c.status == null) clearDay.run(c.student_id, item.id, c.date);
+        else fail(400, `ערך לא תקין ב${item.name}`);
+        touched.set(`${c.student_id}:${item.id}`, [Number(c.student_id), item.id]);
+      } else if (c.value === null || c.value === '' || c.value === 0 && item.kind !== 'exam') {
         del.run(c.student_id, item.id, key);
       } else {
         const v = Number(c.value);
@@ -373,6 +447,7 @@ function saveChanges(user, items, studentIds, key, changes) {
         upsert.run(c.student_id, item.id, key, v, user.id, now);
       }
     }
+    for (const [sid, iid] of touched.values()) syncCount(sid, iid, key, user.id, now);
     db.exec('COMMIT');
   } catch (e) {
     db.exec('ROLLBACK');
@@ -388,7 +463,7 @@ app.get('/api/entry', wrap(req => {
   const values = readValues(key, items, students);
   return {
     class: { id: cls.id, name: cls.name, shift: cls.shift },
-    items, students, values,
+    items, students, values, att: readAttendance(key, items, students), today: today(),
     locked: isLocked(req.user, lastDay),
     future: key > today(),
     days_off: db.prepare('SELECT * FROM days_off WHERE date IN (' + [...daysOff].map(() => '?').join(',') + ') ORDER BY date').all(...daysOff),
@@ -435,6 +510,7 @@ app.get('/api/general', wrap(req => {
   const { key, daysOff, items, students } = generalContext(req.query.date, req.query.reg);
   return {
     items, students, values: readValues(key, items, students),
+    att: readAttendance(key, items, students), today: today(),
     locked: false, future: key > today(),
     days_off: db.prepare('SELECT * FROM days_off WHERE date IN (' + [...daysOff].map(() => '?').join(',') + ') ORDER BY date').all(...daysOff),
     week: weekFor(key), week_start: key,

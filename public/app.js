@@ -205,7 +205,7 @@ async function viewEntry() {
   if (!classes.find(c => c.id === e.classId)) e.classId = classes[0].id;
   e.date = weekStart(e.date || state.today);
   const main = shell(`<h1>הזנת נקודות</h1>
-    <p class="sub">בכל סעיף רושמים כמה פעמים התלמיד נכח השבוע. לחיצה על תא מוסיפה פעם אחת (אחרי המקסימום חוזר לאפס), ואפשר גם להקליד מספר. הכול נשמר אוטומטית.</p>
+    <p class="sub">בכל סעיף מסמנים באילו ימים התלמיד נכח. הכי מהיר: "מלא הכול", ואז לחיצה רק על הימים החריגים. הכול נשמר אוטומטית.</p>
     <div class="card"><div class="toolbar">
       ${classes.length > 1 ? `<select id="cls">${classes.map(c =>
         `<option value="${c.id}" ${c.id === e.classId ? 'selected' : ''}>${esc(c.name)} · ${SHIFT[c.shift]}</option>`).join('')}</select>`
@@ -235,6 +235,7 @@ async function loadGrid() {
 }
 
 // The entry table shared by the group screen and the general list. save(changes) stores a batch.
+// Daily items are marked per day (data.att); the weekly count in values follows the days marked present.
 function renderGrid(grid, data, save, emptyText) {
   const rules = state.settings.exam_rules;
   const examPts = g => { for (const r of rules) if (g >= r.min) return r.points; return 0; };
@@ -242,7 +243,7 @@ function renderGrid(grid, data, save, emptyText) {
   let notice = '';
   if (data.week?.vacation) notice = '<div class="notice">שבוע זה מסומן כחופשה, והנקודות בו לא נספרות.</div>';
   if (data.days_off.length) notice += `<div class="notice">ימים ללא לימודים השבוע: ${data.days_off.map(d =>
-    `${dayName(d.date)}${d.note ? ' (' + esc(d.note) + ')' : ''}`).join(', ')}. המקסימום בכל סעיף כבר מתחשב בזה.</div>`;
+    `${dayName(d.date)}${d.note ? ' (' + esc(d.note) + ')' : ''}`).join(', ')}. ימים אלה מסומנים באפור ולא נספרים.</div>`;
   if (data.future) notice += '<div class="notice">זה שבוע עתידי. אפשר להזין רק עד השבוע הנוכחי.</div>';
   if (data.locked) notice += '<div class="notice bad">הזמן לעדכון השבוע הזה עבר. לתיקון פנה למזכיר.</div>';
   if (!data.items.length) { grid.innerHTML = notice + `<div class="empty">${emptyText}</div>`; return; }
@@ -250,34 +251,59 @@ function renderGrid(grid, data, save, emptyText) {
 
   const readOnly = data.locked || data.future;
   const values = data.values;
+  const att = data.att || {};
   const itemById = new Map(data.items.map(it => [it.id, it]));
+  const daily = data.items.filter(it => it.kind === 'daily');
   const ptsOf = (it, v) => v == null ? 0 : it.kind === 'exam' ? examPts(v) : v * it.points;
   const rowTotal = s => data.items.reduce((a, it) => a + ptsOf(it, values[`${s.id}:${it.id}`]), 0);
   const counterHtml = (it, v) => it.kind === 'weekly' ? '✓' : (v || '');
+  // Days that can be marked now: a study day of the item that has already come
+  const openDates = it => it.dates.filter(d => !d.off && d.date <= data.today).map(d => d.date);
+  const dayOf = (sid, iid, date) => att[`${sid}:${iid}`]?.[date];
+  const countOf = (sid, iid) => Object.values(att[`${sid}:${iid}`] || {}).filter(([st]) => st === 'present').length;
 
-  grid.innerHTML = notice + `<div class="table-wrap"><table class="entry"><thead><tr><th class="name">תלמיד</th>
+  const dayBtn = (s, it, d) => {
+    const rec = dayOf(s.id, it.id, d.date);
+    const cls = d.off ? 'off' : rec ? (rec[0] === 'present' ? 'on' : 'late') + (rec[1] === 'camera' ? ' cam' : '') : '';
+    const title = d.off ? 'אין לימודים' : `${dayName(d.date)}${rec?.[1] === 'camera' ? ' · נרשם במצלמה' : ''}`;
+    return `<button class="day ${cls}" data-s="${s.id}" data-i="${it.id}" data-d="${d.date}" title="${title}"
+      ${readOnly || d.off || d.date > data.today ? 'disabled' : ''}>${DAYS[weekday(d.date)]}</button>`;
+  };
+  const dailyCell = (s, it) => `<div class="days">${it.dates.map(d => dayBtn(s, it, d)).join('')}</div>
+    <span class="cnt" id="cnt-${s.id}-${it.id}">${countOf(s.id, it.id)}/${it.max}</span>`;
+
+  const canFill = !readOnly && daily.length > 0;
+  grid.innerHTML = notice + (canFill ? `<div class="grid-actions">
+      <button class="btn small" id="fill-all">מלא הכול</button>
+      <span class="muted small">מסמן "נוכח" לכולם בכל הימים שכבר עברו. אחר כך לוחצים רק על החריגים: לחיצה אחת "איחר", לחיצה שנייה "חסר".</span>
+      <span class="legend"><i class="day on"></i>נוכח <i class="day late"></i>איחר <i class="day"></i>חסר <i class="day on cam"></i>מצלמה</span>
+    </div>` : '') + `<div class="table-wrap"><table class="entry"><thead><tr><th class="name">תלמיד</th>
     ${data.items.map(it => `<th class="num">${esc(it.name)}<span class="pts">${it.kind === 'exam' ? 'ציון'
         : it.kind === 'daily' ? `עד ${it.max} · ${it.points} נק'` : it.points + ' נק\''}</span>
       ${it.kind !== 'exam' && !readOnly ? `<button class="btn secondary small all" data-all="${it.id}">${it.kind === 'daily' ? 'מלא' : 'כולם'}</button>` : ''}</th>`).join('')}
     <th class="num">סה"כ</th></tr></thead><tbody>
-    ${data.students.map(s => `<tr><td class="name">${esc(s.first_name)} ${esc(s.last_name)}${s.morning !== undefined
+    ${data.students.map(s => `<tr><td class="name">${canFill ? `<button class="btn ghost small rowfill" data-row="${s.id}" title="מלא את כל הימים לתלמיד זה">מלא</button>` : ''}${esc(s.first_name)} ${esc(s.last_name)}${s.morning !== undefined
       ? `<div class="muted small">${esc([s.morning, s.afternoon].filter(Boolean).join(' · '))}</div>` : ''}</td>
       ${data.items.map(it => {
         const v = values[`${s.id}:${it.id}`];
         return `<td class="num">${it.kind === 'exam'
           ? `<input type="number" class="grade-input" min="0" max="100" data-s="${s.id}" data-i="${it.id}" value="${v ?? ''}" ${readOnly ? 'disabled' : ''}><span class="grade-pts" id="gp-${s.id}-${it.id}">${v != null ? examPts(v) + ' נק\'' : ''}</span>`
+          : it.kind === 'daily' ? dailyCell(s, it)
           : `<button class="cell-toggle ${cellClass(it, v)}" data-s="${s.id}" data-i="${it.id}" ${readOnly ? 'disabled' : ''}>${counterHtml(it, v)}</button>`}</td>`;
       }).join('')}
       <td class="num rowtotal" id="rt-${s.id}">${rowTotal(s)}</td></tr>`).join('')}
     </tbody></table></div>`;
 
   const pending = new Map();
+  const refreshRow = sid => {
+    document.getElementById(`rt-${sid}`).textContent = rowTotal(data.students.find(x => x.id === sid));
+  };
+  const schedule = () => { clearTimeout(schedule.t); schedule.t = setTimeout(flush, 500); };
   const queue = (sid, iid, value) => {
     values[`${sid}:${iid}`] = value;
     pending.set(`${sid}:${iid}`, { student_id: sid, item_id: iid, value });
-    document.getElementById(`rt-${sid}`).textContent = rowTotal(data.students.find(x => x.id === sid));
-    clearTimeout(queue.t);
-    queue.t = setTimeout(flush, 500);
+    refreshRow(sid);
+    schedule();
   };
   const flush = async () => {
     if (!pending.size) return;
@@ -297,7 +323,37 @@ function renderGrid(grid, data, save, emptyText) {
     btn.textContent = counterHtml(it, v);
     queue(Number(btn.dataset.s), it.id, v);
   };
+  // status: 'present' | 'late' | null (absent). Marking by the teacher replaces a camera mark.
+  const setDay = (sid, it, date, status) => {
+    const key = `${sid}:${it.id}`;
+    if (status) (att[key] ??= {})[date] = [status, 'teacher'];
+    else if (att[key]) delete att[key][date];
+    const btn = grid.querySelector(`.day[data-s="${sid}"][data-i="${it.id}"][data-d="${date}"]`);
+    if (btn) btn.className = `day ${status === 'present' ? 'on' : status === 'late' ? 'late' : ''}`;
+    const n = countOf(sid, it.id);
+    values[key] = n || null;
+    document.getElementById(`cnt-${sid}-${it.id}`).textContent = `${n}/${it.max}`;
+    pending.set(`${key}:${date}`, { student_id: sid, item_id: it.id, date, status });
+    refreshRow(sid);
+    schedule();
+  };
+  // Fill = mark present every open day that has no mark yet. Days already marked (late, or by the camera) stay.
+  // When everything is already present, the column / row button clears what the teacher filled.
+  const fill = (pairs, toggle) => {
+    const empty = pairs.flatMap(([sid, it]) => openDates(it).filter(d => !dayOf(sid, it.id, d)).map(d => [sid, it, d]));
+    if (empty.length || !toggle) { empty.forEach(([sid, it, d]) => setDay(sid, it, d, 'present')); return; }
+    pairs.forEach(([sid, it]) => openDates(it).forEach(d => {
+      const rec = dayOf(sid, it.id, d);
+      if (rec && rec[0] === 'present' && rec[1] !== 'camera') setDay(sid, it, d, null);
+    }));
+  };
 
+  grid.querySelectorAll('.day:not(:disabled)').forEach(btn => btn.onclick = () => {
+    const sid = Number(btn.dataset.s), it = itemById.get(Number(btn.dataset.i));
+    const cur = dayOf(sid, it.id, btn.dataset.d)?.[0];
+    // present -> late -> absent -> present
+    setDay(sid, it, btn.dataset.d, cur === 'present' ? 'late' : cur === 'late' ? null : 'present');
+  });
   grid.querySelectorAll('.cell-toggle').forEach(btn => {
     btn.onclick = () => {
       const it = itemById.get(Number(btn.dataset.i));
@@ -312,10 +368,15 @@ function renderGrid(grid, data, save, emptyText) {
   });
   grid.querySelectorAll('[data-all]').forEach(btn => btn.onclick = () => {
     const it = itemById.get(Number(btn.dataset.all));
+    if (it.kind === 'daily') { fill(data.students.map(s => [s.id, it]), true); return; }
     const cells = [...grid.querySelectorAll(`.cell-toggle[data-i="${it.id}"]`)];
     const allFull = cells.every(c => values[`${c.dataset.s}:${it.id}`] === it.max);
     cells.forEach(c => setCell(c, allFull ? 0 : it.max));
   });
+  grid.querySelectorAll('[data-row]').forEach(btn => btn.onclick = () =>
+    fill(daily.map(it => [Number(btn.dataset.row), it]), true));
+  grid.querySelector('#fill-all')?.addEventListener('click', () =>
+    fill(data.students.flatMap(s => daily.map(it => [s.id, it])), false));
   grid.querySelectorAll('.grade-input').forEach(inp => inp.onchange = () => {
     const sid = Number(inp.dataset.s), iid = Number(inp.dataset.i);
     let v = inp.value === '' ? null : Math.max(0, Math.min(100, Math.round(Number(inp.value))));
