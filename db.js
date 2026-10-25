@@ -195,9 +195,10 @@ function seed() {
   for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) insSetting.run(k, v);
 
   if (db.prepare('SELECT COUNT(*) AS n FROM items').get().n === 0) {
-    const ins = db.prepare('INSERT INTO items (name, kind, shift, points, days, sort) VALUES (?, ?, ?, ?, ?, ?)');
+    // office items (Friday/Shabbat) live on the secretary's general list, as v6 does for existing databases
+    const ins = db.prepare('INSERT INTO items (name, kind, shift, points, days, sort, general) VALUES (?, ?, ?, ?, ?, ?, ?)');
     DEFAULT_ITEMS.forEach(([name, kind, shift, points, days], i) =>
-      ins.run(name, kind, shift, points, days ?? '0,1,2,3,4', i));
+      ins.run(name, kind, shift, points, days ?? '0,1,2,3,4', i, shift === 'office' ? 1 : 0));
   }
 
   // Without ADMIN_PASSWORD the first visitor to the site creates the admin account (see /api/setup).
