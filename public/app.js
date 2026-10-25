@@ -185,7 +185,7 @@ window.addEventListener('hashchange', route);
 async function boot() {
   try {
     const me = await api('/api/me');
-    Object.assign(state, { me: me.user, settings: me.settings, today: me.today });
+    Object.assign(state, { me: me.user, settings: me.settings, today: me.today, reportDay: me.report_day || me.today });
   } catch { return; }
   // Every login or reopening of the site starts on the dashboard, not the last page visited.
   history.replaceState(null, '', '#/dashboard');
@@ -203,7 +203,7 @@ async function viewEntry() {
     return;
   }
   if (!classes.find(c => c.id === e.classId)) e.classId = classes[0].id;
-  e.date = weekStart(e.date || state.today);
+  e.date = weekStart(e.date || state.reportDay);
   const main = shell(`<h1>הזנת נקודות</h1>
     <p class="sub">${state.settings.daily_mode
       ? 'בכל סעיף מסמנים באילו ימים התלמיד נכח. הכי מהיר: "מלא הכול", ואז לחיצה רק על הימים החריגים. הכול נשמר אוטומטית.'
@@ -217,13 +217,29 @@ async function viewEntry() {
         <button class="btn secondary small" id="next" title="שבוע הבא">←</button>
         <button class="btn ghost small" id="today">השבוע</button></div>
       <span class="spacer"></span><span id="datelabel" class="muted"></span>
+      ${isStaff() ? '<button class="btn ghost small" id="move">העברה לשבוע אחר</button>' : ''}
     </div><div id="grid"></div></div>`);
+  main.querySelector('#move')?.addEventListener('click', () => moveWeek(e));
   main.querySelector('#cls')?.addEventListener('change', ev => { e.classId = Number(ev.target.value); loadGrid(); });
   main.querySelector('#prev').onclick = () => { e.date = addDays(e.date, -7); viewEntry(); };
   main.querySelector('#next').onclick = () => { e.date = addDays(e.date, 7); viewEntry(); };
-  main.querySelector('#today').onclick = () => { e.date = state.today; viewEntry(); };
+  main.querySelector('#today').onclick = () => { e.date = state.reportDay; viewEntry(); };
   main.querySelector('#date').onchange = ev => { if (ev.target.value) { e.date = ev.target.value; viewEntry(); } };
   await loadGrid();
+}
+
+// Staff: move what was entered for this group on the shown week to the week it belonged to.
+function moveWeek(e) {
+  const from = weekStart(e.date);
+  openDialog('העברת הזנה לשבוע אחר', `
+    <p>כל מה שהוזן לקבוצה הזו בשבוע ${dateRange(from, addDays(from, 6))} יועבר לשבוע שתבחר, וימחק מהשבוע הנוכחי.</p>
+    <label class="field">תאריך כלשהו בשבוע היעד<input type="date" name="to" value="${addDays(from, -7)}" required></label>
+    <label class="check"><input type="checkbox" name="overwrite"> אם באותו תלמיד וסעיף כבר יש ערך בשבוע היעד, להחליף אותו (שאר הערכים שם נשארים)</label>`, async d => {
+    const res = await api('/api/entry/move', { body: { class_id: e.classId, from, to: d.to, overwrite: !!d.overwrite } });
+    e.date = res.to;
+    toast(`הועברו ${res.moved} ערכים לשבוע ${dateRange(res.to, addDays(res.to, 6))}`, 5000);
+    viewEntry();
+  }, 'העברה');
 }
 
 async function loadGrid() {
@@ -394,7 +410,7 @@ function renderGrid(grid, data, save, emptyText) {
 async function viewGeneral() {
   if (!isStaff()) { location.hash = '#/entry'; return; }
   const e = state.entry;
-  e.date = weekStart(e.date || state.today);
+  e.date = weekStart(e.date || state.reportDay);
   const main = shell(`<h1>רשימה כללית</h1>
     <p class="sub">כל התלמידים מכל הקבוצות לפי א"ב, לסעיפים שהמזכיר מזין (כמו שיחה ביום ג'). לרשימה ריקה להדפסה: דוחות ← רשימה ריקה.</p>
     <div class="card"><div class="toolbar">
@@ -407,7 +423,7 @@ async function viewGeneral() {
     </div><div id="grid"></div></div>`);
   main.querySelector('#prev').onclick = () => { e.date = addDays(e.date, -7); viewGeneral(); };
   main.querySelector('#next').onclick = () => { e.date = addDays(e.date, 7); viewGeneral(); };
-  main.querySelector('#today').onclick = () => { e.date = state.today; viewGeneral(); };
+  main.querySelector('#today').onclick = () => { e.date = state.reportDay; viewGeneral(); };
   main.querySelector('#date').onchange = ev => { if (ev.target.value) { e.date = ev.target.value; viewGeneral(); } };
   const data = await api(`/api/general?date=${e.date}`);
   main.querySelector('#datelabel').textContent =
@@ -646,7 +662,7 @@ async function viewReport() {
 
 // All students A-Z with empty columns for the general-list items, to fill in by hand and copy in later.
 async function viewBlankList(r) {
-  const d = await api('/api/general?date=' + (r.week || state.today) + (r.reg ? '&reg=' + r.reg : ''));
+  const d = await api('/api/general?date=' + (r.week || state.reportDay) + (r.reg ? '&reg=' + r.reg : ''));
   const cols = d.items.length ? d.items.map(it => it.name) : ['נוכחות'];
   const title = `רשימה למילוי · ${cols.join(', ')}`;
   const range = dateRange(d.week_start, addDays(d.week_start, 6));
@@ -1246,7 +1262,7 @@ function enrollFace(st, done) {
 
 async function adminLog() {
   const { rows } = await api('/api/admin/audit');
-  const ACT = { entry: 'הזנת נקודות', 'phone-check': 'בדיקת נקודות בטלפון', bonus: 'נקודות מיוחדות', 'bonus-delete': 'מחיקת נקודות מיוחדות', 'user-create': 'משתמש חדש',
+  const ACT = { entry: 'הזנת נקודות', 'entry-move': 'העברת הזנה לשבוע אחר', 'phone-check': 'בדיקת נקודות בטלפון', bonus: 'נקודות מיוחדות', 'bonus-delete': 'מחיקת נקודות מיוחדות', 'user-create': 'משתמש חדש',
     'user-update': 'עדכון משתמש', 'class-create': 'קבוצה חדשה', 'class-update': 'עדכון קבוצה', 'class-delete': 'מחיקת קבוצה',
     'student-create': 'תלמיד חדש', 'student-update': 'עדכון תלמיד', 'student-import': 'ייבוא תלמידים', 'item-create': 'סעיף חדש',
     'item-update': 'עדכון סעיף', settings: 'הגדרות', 'weeks-generate': 'יצירת שבועות', 'week-update': 'עדכון שבוע', 'day-off': 'יום ללא לימודים' };

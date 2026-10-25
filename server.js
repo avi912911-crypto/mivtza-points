@@ -38,6 +38,11 @@ function weekStart(date) {
 function daysBetween(a, b) {
   return Math.round((new Date(b + 'T00:00:00Z') - new Date(a + 'T00:00:00Z')) / 86400000);
 }
+// The week people report on by default: on Sunday they still report the week that just ended.
+function reportDay() {
+  const t = today();
+  return weekday(t) === 0 ? addDays(t, -7) : t;
+}
 const isDate = s => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s);
 
 // ---------- helpers ----------
@@ -407,6 +412,7 @@ app.get('/api/me', wrap(req => {
     settings: { program_name: s.program_name, logo: s.logo, target: Number(s.target), daily_mode: s.daily_mode === '1',
                 edit_days: Number(s.edit_days), exam_rules: JSON.parse(s.exam_rules) },
     today: today(),
+    report_day: reportDay(),
   };
 }));
 
@@ -596,6 +602,44 @@ app.post('/api/entry', wrap(req => {
   saveChanges(req.user, items, studentIds, key, changes);
   audit(req.user.id, 'entry', { class: cls.name, week: key, count: changes.length });
   return { ok: true };
+}));
+
+// Staff fix entries saved on the wrong week: move a group's values for this screen's items to another week.
+app.post('/api/entry/move', staff, wrap(req => {
+  const { class_id, from, to, overwrite } = req.body || {};
+  if (!isDate(to)) fail(400, 'יש לבחור שבוע יעד');
+  const { cls, items, key } = entryContext(req, class_id, from);
+  const target = weekStart(to);
+  if (target === key) fail(400, 'זה אותו שבוע');
+  if (target > today()) fail(400, 'אי אפשר להעביר לשבוע עתידי');
+  const targetMax = new Map(weekItems(target, weekDaysOff(target)).map(it => [it.id, it.max]));
+  const ids = items.map(i => i.id);
+  const students = db.prepare(`SELECT id FROM students WHERE ${groupColumn(cls)} = ?`).all(cls.id).map(s => s.id);
+  if (!ids.length || !students.length) fail(400, 'אין מה להעביר');
+  const where = `item_id IN (${ids.map(() => '?').join(',')}) AND student_id IN (${students.map(() => '?').join(',')})`;
+  const rows = db.prepare(`SELECT * FROM entries WHERE date = ? AND ${where}`).all(key, ...ids, ...students);
+  if (!rows.length) fail(400, 'אין ערכים בשבוע הזה להעברה');
+  const clash = db.prepare(`SELECT COUNT(*) AS n FROM entries WHERE date = ? AND ${where}`).get(target, ...ids, ...students).n;
+  if (clash && !overwrite) fail(409, `בשבוע היעד כבר יש ${clash} ערכים לקבוצה הזו. סמן "להחליף" כדי שהערכים מהשבוע הזה יחליפו אותם.`);
+  const now = new Date().toISOString();
+  const ins = db.prepare(`INSERT INTO entries (student_id, item_id, date, value, updated_by, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (student_id, item_id, date)
+    DO UPDATE SET value = excluded.value, updated_by = excluded.updated_by, updated_at = excluded.updated_at`);
+  let moved = 0;
+  db.exec('BEGIN');
+  try {
+    for (const r of rows) {
+      const max = targetMax.get(r.item_id);
+      if (max) { ins.run(r.student_id, r.item_id, target, Math.min(r.value, max), req.user.id, now); moved++; }
+    }
+    db.prepare(`DELETE FROM entries WHERE date = ? AND ${where}`).run(key, ...ids, ...students);
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+  audit(req.user.id, 'entry-move', { class: cls.name, from: key, to: target, count: moved });
+  return { moved, to: target };
 }));
 
 // ---------- general list (secretary): all students A-Z ----------
@@ -792,6 +836,7 @@ app.get('/api/students/:id/card', wrap(req => {
 app.get('/api/report', wrap(req => {
   const { perStudent, weeks, target } = computeTotals();
   const week = weeks.find(w => w.start_date === req.query.week)
+    || weeks.find(w => w.start_date === weekStart(reportDay()))
     || progressInfo(weeks, target).current || weeks[weeks.length - 1] || null;
   const own = req.user.role === 'teacher'
     ? teacherClassIds(req.user.id)
