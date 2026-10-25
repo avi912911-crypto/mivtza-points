@@ -217,7 +217,7 @@ async function viewEntry() {
         <button class="btn secondary small" id="next" title="שבוע הבא">←</button>
         <button class="btn ghost small" id="today">השבוע</button></div>
       <span class="spacer"></span><span id="datelabel" class="muted"></span>
-      ${isStaff() ? '<button class="btn ghost small" id="move">העברה לשבוע אחר</button>' : ''}
+      ${isStaff() ? '<button class="btn secondary small" id="move">העברה לשבוע אחר</button>' : ''}
     </div><div id="grid"></div></div>`);
   main.querySelector('#move')?.addEventListener('click', () => moveWeek(e));
   main.querySelector('#cls')?.addEventListener('change', ev => { e.classId = Number(ev.target.value); loadGrid(); });
