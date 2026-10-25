@@ -633,6 +633,25 @@ app.post('/api/entry/move', staff, wrap(req => {
       if (max) { ins.run(r.student_id, r.item_id, target, Math.min(r.value, max), req.user.id, now); moved++; }
     }
     db.prepare(`DELETE FROM entries WHERE date = ? AND ${where}`).run(key, ...ids, ...students);
+    // Days marked by the teacher move along by whole weeks; camera marks keep their real date.
+    const shift = daysBetween(key, target);
+    const range = `date BETWEEN ? AND ? AND source != 'camera' AND ${where}`;
+    const marks = db.prepare(`SELECT * FROM attendance WHERE ${range}`).all(key, addDays(key, 6), ...ids, ...students);
+    db.prepare(`DELETE FROM attendance WHERE ${range}`).run(target, addDays(target, 6), ...ids, ...students);
+    db.prepare(`DELETE FROM attendance WHERE ${range}`).run(key, addDays(key, 6), ...ids, ...students);
+    const daysOff = weekDaysOff(target);
+    const itemDays = new Map(items.map(i => [i.id, i.days.split(',')]));
+    const put = db.prepare(`INSERT OR IGNORE INTO attendance (student_id, item_id, date, status, source, at, updated_by, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
+    for (const m of marks) {
+      const date = addDays(m.date, shift);
+      if (!daysOff.has(date) && itemDays.get(m.item_id).includes(String(weekday(date))))
+        put.run(m.student_id, m.item_id, date, m.status, m.source, m.at, req.user.id, now);
+    }
+    if (dailyMode()) {
+      for (const it of items.filter(i => i.kind === 'daily'))
+        for (const sid of students) for (const ws of [key, target]) syncCount(sid, it.id, ws, req.user.id, now);
+    }
     db.exec('COMMIT');
   } catch (e) {
     db.exec('ROLLBACK');
