@@ -133,6 +133,39 @@ db.exec(`CREATE TABLE IF NOT EXISTS class_helpers (
 if (addColumn('students', 'registered', 'INTEGER NOT NULL DEFAULT 0')) {
   db.exec("UPDATE items SET general = 1 WHERE shift = 'office'");
 }
+// v7: daily attendance, one row per student, daily item and day. A missing row means absent.
+// The weekly count in entries is derived from the 'present' rows (see syncCount in server.js).
+// source: teacher = entered on the weekly screen, camera = the tablet, legacy = spread from an old weekly count
+db.exec(`CREATE TABLE IF NOT EXISTS attendance (
+  student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+  date TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('present','late')),
+  source TEXT NOT NULL DEFAULT 'teacher' CHECK (source IN ('teacher','camera','legacy')),
+  at TEXT,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (student_id, item_id, date)
+)`);
+db.exec('CREATE INDEX IF NOT EXISTS attendance_date ON attendance(date)');
+// v8: face recognition at the tablet. Only students marked face_allowed may enrol; a face is kept as
+// a few 128-number descriptors (JSON), never as a picture. A window is when an item can be checked in
+// at the tablet: present until present_until, late until late_until. weekday NULL = every day of the item.
+addColumn('students', 'face_allowed', 'INTEGER NOT NULL DEFAULT 0');
+db.exec(`CREATE TABLE IF NOT EXISTS face_descriptors (
+  id INTEGER PRIMARY KEY,
+  student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  descriptor TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS item_windows (
+  id INTEGER PRIMARY KEY,
+  item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+  weekday INTEGER,
+  start TEXT NOT NULL,
+  present_until TEXT NOT NULL,
+  late_until TEXT NOT NULL
+)`);
 
 function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString('hex');
@@ -157,6 +190,11 @@ const DEFAULT_SETTINGS = {
     { min: 80, points: 40 },
     { min: 70, points: 30 },
   ]),
+  // 1 = teachers mark days and camera check-ins count for points; 0 = weekly counts, camera on trial
+  daily_mode: '0',
+  // one sentence per line, {שם} = the student's first name
+  greetings_present: 'שלום {שם}, כל הכבוד!\nיישר כוח {שם}!\nברוך הבא {שם}, המשך כך!',
+  greetings_late: '{שם}, נרשמת באיחור. בפעם הבאה מקדימים!',
 };
 
 const DEFAULT_ITEMS = [
@@ -180,9 +218,10 @@ function seed() {
   for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) insSetting.run(k, v);
 
   if (db.prepare('SELECT COUNT(*) AS n FROM items').get().n === 0) {
-    const ins = db.prepare('INSERT INTO items (name, kind, shift, points, days, sort) VALUES (?, ?, ?, ?, ?, ?)');
+    // office items (Friday/Shabbat) live on the secretary's general list, as v6 does for existing databases
+    const ins = db.prepare('INSERT INTO items (name, kind, shift, points, days, sort, general) VALUES (?, ?, ?, ?, ?, ?, ?)');
     DEFAULT_ITEMS.forEach(([name, kind, shift, points, days], i) =>
-      ins.run(name, kind, shift, points, days ?? '0,1,2,3,4', i));
+      ins.run(name, kind, shift, points, days ?? '0,1,2,3,4', i, shift === 'office' ? 1 : 0));
   }
 
   // Without ADMIN_PASSWORD the first visitor to the site creates the admin account (see /api/setup).

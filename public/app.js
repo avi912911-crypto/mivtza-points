@@ -124,7 +124,7 @@ function navLinks() {
   const links = [['#/entry', 'הזנת נקודות'], ['#/dashboard', 'דשבורד'], ['#/report', 'דוחות']];
   if (isStaff()) links.splice(1, 0, ['#/general', 'רשימה כללית']);
   if (isStaff()) links.push(['#/admin/students', 'תלמידים'], ['#/admin/classes', 'קבוצות'], ['#/admin/weeks', 'לוח שבועות']);
-  if (isAdmin()) links.push(['#/admin/users', 'משתמשים'], ['#/admin/items', 'הגדרת ניקוד'], ['#/admin/settings', 'הגדרות']);
+  if (isAdmin()) links.push(['#/admin/users', 'משתמשים'], ['#/admin/items', 'הגדרת ניקוד'], ['#/admin/faces', 'זיהוי פנים'], ['#/admin/settings', 'הגדרות']);
   if (isStaff()) links.push(['#/admin/log', 'יומן שינויים']);
   return links;
 }
@@ -205,7 +205,9 @@ async function viewEntry() {
   if (!classes.find(c => c.id === e.classId)) e.classId = classes[0].id;
   e.date = weekStart(e.date || state.reportDay);
   const main = shell(`<h1>הזנת נקודות</h1>
-    <p class="sub">בכל סעיף רושמים כמה פעמים התלמיד נכח השבוע. לחיצה על תא מוסיפה פעם אחת (אחרי המקסימום חוזר לאפס), ואפשר גם להקליד מספר. הכול נשמר אוטומטית.</p>
+    <p class="sub">${state.settings.daily_mode
+      ? 'בכל סעיף מסמנים באילו ימים התלמיד נכח. הכי מהיר: "מלא הכול", ואז לחיצה רק על הימים החריגים. הכול נשמר אוטומטית.'
+      : 'בכל סעיף רושמים כמה פעמים התלמיד נכח השבוע. לחיצה על תא מוסיפה פעם אחת (אחרי המקסימום חוזר לאפס), ואפשר גם להקליד מספר. הכול נשמר אוטומטית.'}</p>
     <div class="card"><div class="toolbar">
       ${classes.length > 1 ? `<select id="cls">${classes.map(c =>
         `<option value="${c.id}" ${c.id === e.classId ? 'selected' : ''}>${esc(c.name)} · ${SHIFT[c.shift]}</option>`).join('')}</select>`
@@ -251,6 +253,7 @@ async function loadGrid() {
 }
 
 // The entry table shared by the group screen and the general list. save(changes) stores a batch.
+// Daily items are marked per day (data.att); the weekly count in values follows the days marked present.
 function renderGrid(grid, data, save, emptyText) {
   const rules = state.settings.exam_rules;
   const examPts = g => { for (const r of rules) if (g >= r.min) return r.points; return 0; };
@@ -258,7 +261,7 @@ function renderGrid(grid, data, save, emptyText) {
   let notice = '';
   if (data.week?.vacation) notice = '<div class="notice">שבוע זה מסומן כחופשה, והנקודות בו לא נספרות.</div>';
   if (data.days_off.length) notice += `<div class="notice">ימים ללא לימודים השבוע: ${data.days_off.map(d =>
-    `${dayName(d.date)}${d.note ? ' (' + esc(d.note) + ')' : ''}`).join(', ')}. המקסימום בכל סעיף כבר מתחשב בזה.</div>`;
+    `${dayName(d.date)}${d.note ? ' (' + esc(d.note) + ')' : ''}`).join(', ')}. ימים אלה מסומנים באפור ולא נספרים.</div>`;
   if (data.future) notice += '<div class="notice">זה שבוע עתידי. אפשר להזין רק עד השבוע הנוכחי.</div>';
   if (data.locked) notice += '<div class="notice bad">הזמן לעדכון השבוע הזה עבר. לתיקון פנה למזכיר.</div>';
   if (!data.items.length) { grid.innerHTML = notice + `<div class="empty">${emptyText}</div>`; return; }
@@ -266,34 +269,59 @@ function renderGrid(grid, data, save, emptyText) {
 
   const readOnly = data.locked || data.future;
   const values = data.values;
+  const att = data.att || {};
   const itemById = new Map(data.items.map(it => [it.id, it]));
+  const daily = data.items.filter(it => it.dates);
   const ptsOf = (it, v) => v == null ? 0 : it.kind === 'exam' ? examPts(v) : v * it.points;
   const rowTotal = s => data.items.reduce((a, it) => a + ptsOf(it, values[`${s.id}:${it.id}`]), 0);
   const counterHtml = (it, v) => it.kind === 'weekly' ? '✓' : (v || '');
+  // Days that can be marked now: a study day of the item that has already come
+  const openDates = it => it.dates.filter(d => !d.off && d.date <= data.today).map(d => d.date);
+  const dayOf = (sid, iid, date) => att[`${sid}:${iid}`]?.[date];
+  const countOf = (sid, iid) => Object.values(att[`${sid}:${iid}`] || {}).filter(([st]) => st === 'present').length;
 
-  grid.innerHTML = notice + `<div class="table-wrap"><table class="entry"><thead><tr><th class="name">תלמיד</th>
+  const dayBtn = (s, it, d) => {
+    const rec = dayOf(s.id, it.id, d.date);
+    const cls = d.off ? 'off' : rec ? (rec[0] === 'present' ? 'on' : 'late') + (rec[1] === 'camera' ? ' cam' : '') : '';
+    const title = d.off ? 'אין לימודים' : `${dayName(d.date)}${rec?.[1] === 'camera' ? ' · נרשם במצלמה' : ''}`;
+    return `<button class="day ${cls}" data-s="${s.id}" data-i="${it.id}" data-d="${d.date}" title="${title}"
+      ${readOnly || d.off || d.date > data.today ? 'disabled' : ''}>${DAYS[weekday(d.date)]}</button>`;
+  };
+  const dailyCell = (s, it) => `<div class="days">${it.dates.map(d => dayBtn(s, it, d)).join('')}</div>
+    <span class="cnt" id="cnt-${s.id}-${it.id}">${countOf(s.id, it.id)}/${it.max}</span>`;
+
+  const canFill = !readOnly && daily.length > 0;
+  grid.innerHTML = notice + (canFill ? `<div class="grid-actions">
+      <button class="btn small" id="fill-all">מלא הכול</button>
+      <span class="muted small">מסמן "נוכח" לכולם בכל הימים שכבר עברו. אחר כך לוחצים רק על החריגים: לחיצה אחת "איחר", לחיצה שנייה "חסר".</span>
+      <span class="legend"><i class="day on"></i>נוכח <i class="day late"></i>איחר <i class="day"></i>חסר <i class="day on cam"></i>מצלמה</span>
+    </div>` : '') + `<div class="table-wrap"><table class="entry"><thead><tr><th class="name">תלמיד</th>
     ${data.items.map(it => `<th class="num">${esc(it.name)}<span class="pts">${it.kind === 'exam' ? 'ציון'
         : it.kind === 'daily' ? `עד ${it.max} · ${it.points} נק'` : it.points + ' נק\''}</span>
       ${it.kind !== 'exam' && !readOnly ? `<button class="btn secondary small all" data-all="${it.id}">${it.kind === 'daily' ? 'מלא' : 'כולם'}</button>` : ''}</th>`).join('')}
     <th class="num">סה"כ</th></tr></thead><tbody>
-    ${data.students.map(s => `<tr><td class="name">${esc(s.first_name)} ${esc(s.last_name)}${s.morning !== undefined
+    ${data.students.map(s => `<tr><td class="name">${canFill ? `<button class="btn ghost small rowfill" data-row="${s.id}" title="מלא את כל הימים לתלמיד זה">מלא</button>` : ''}${esc(s.first_name)} ${esc(s.last_name)}${s.morning !== undefined
       ? `<div class="muted small">${esc([s.morning, s.afternoon].filter(Boolean).join(' · '))}</div>` : ''}</td>
       ${data.items.map(it => {
         const v = values[`${s.id}:${it.id}`];
         return `<td class="num">${it.kind === 'exam'
           ? `<input type="number" class="grade-input" min="0" max="100" data-s="${s.id}" data-i="${it.id}" value="${v ?? ''}" ${readOnly ? 'disabled' : ''}><span class="grade-pts" id="gp-${s.id}-${it.id}">${v != null ? examPts(v) + ' נק\'' : ''}</span>`
+          : it.dates ? dailyCell(s, it)
           : `<button class="cell-toggle ${cellClass(it, v)}" data-s="${s.id}" data-i="${it.id}" ${readOnly ? 'disabled' : ''}>${counterHtml(it, v)}</button>`}</td>`;
       }).join('')}
       <td class="num rowtotal" id="rt-${s.id}">${rowTotal(s)}</td></tr>`).join('')}
     </tbody></table></div>`;
 
   const pending = new Map();
+  const refreshRow = sid => {
+    document.getElementById(`rt-${sid}`).textContent = rowTotal(data.students.find(x => x.id === sid));
+  };
+  const schedule = () => { clearTimeout(schedule.t); schedule.t = setTimeout(flush, 500); };
   const queue = (sid, iid, value) => {
     values[`${sid}:${iid}`] = value;
     pending.set(`${sid}:${iid}`, { student_id: sid, item_id: iid, value });
-    document.getElementById(`rt-${sid}`).textContent = rowTotal(data.students.find(x => x.id === sid));
-    clearTimeout(queue.t);
-    queue.t = setTimeout(flush, 500);
+    refreshRow(sid);
+    schedule();
   };
   const flush = async () => {
     if (!pending.size) return;
@@ -313,7 +341,37 @@ function renderGrid(grid, data, save, emptyText) {
     btn.textContent = counterHtml(it, v);
     queue(Number(btn.dataset.s), it.id, v);
   };
+  // status: 'present' | 'late' | null (absent). Marking by the teacher replaces a camera mark.
+  const setDay = (sid, it, date, status) => {
+    const key = `${sid}:${it.id}`;
+    if (status) (att[key] ??= {})[date] = [status, 'teacher'];
+    else if (att[key]) delete att[key][date];
+    const btn = grid.querySelector(`.day[data-s="${sid}"][data-i="${it.id}"][data-d="${date}"]`);
+    if (btn) btn.className = `day ${status === 'present' ? 'on' : status === 'late' ? 'late' : ''}`;
+    const n = countOf(sid, it.id);
+    values[key] = n || null;
+    document.getElementById(`cnt-${sid}-${it.id}`).textContent = `${n}/${it.max}`;
+    pending.set(`${key}:${date}`, { student_id: sid, item_id: it.id, date, status });
+    refreshRow(sid);
+    schedule();
+  };
+  // Fill = mark present every open day that has no mark yet. Days already marked (late, or by the camera) stay.
+  // When everything is already present, the column / row button clears what the teacher filled.
+  const fill = (pairs, toggle) => {
+    const empty = pairs.flatMap(([sid, it]) => openDates(it).filter(d => !dayOf(sid, it.id, d)).map(d => [sid, it, d]));
+    if (empty.length || !toggle) { empty.forEach(([sid, it, d]) => setDay(sid, it, d, 'present')); return; }
+    pairs.forEach(([sid, it]) => openDates(it).forEach(d => {
+      const rec = dayOf(sid, it.id, d);
+      if (rec && rec[0] === 'present' && rec[1] !== 'camera') setDay(sid, it, d, null);
+    }));
+  };
 
+  grid.querySelectorAll('.day:not(:disabled)').forEach(btn => btn.onclick = () => {
+    const sid = Number(btn.dataset.s), it = itemById.get(Number(btn.dataset.i));
+    const cur = dayOf(sid, it.id, btn.dataset.d)?.[0];
+    // present -> late -> absent -> present
+    setDay(sid, it, btn.dataset.d, cur === 'present' ? 'late' : cur === 'late' ? null : 'present');
+  });
   grid.querySelectorAll('.cell-toggle').forEach(btn => {
     btn.onclick = () => {
       const it = itemById.get(Number(btn.dataset.i));
@@ -328,10 +386,15 @@ function renderGrid(grid, data, save, emptyText) {
   });
   grid.querySelectorAll('[data-all]').forEach(btn => btn.onclick = () => {
     const it = itemById.get(Number(btn.dataset.all));
+    if (it.dates) { fill(data.students.map(s => [s.id, it]), true); return; }
     const cells = [...grid.querySelectorAll(`.cell-toggle[data-i="${it.id}"]`)];
     const allFull = cells.every(c => values[`${c.dataset.s}:${it.id}`] === it.max);
     cells.forEach(c => setCell(c, allFull ? 0 : it.max));
   });
+  grid.querySelectorAll('[data-row]').forEach(btn => btn.onclick = () =>
+    fill(daily.map(it => [Number(btn.dataset.row), it]), true));
+  grid.querySelector('#fill-all')?.addEventListener('click', () =>
+    fill(data.students.flatMap(s => daily.map(it => [s.id, it])), false));
   grid.querySelectorAll('.grade-input').forEach(inp => inp.onchange = () => {
     const sid = Number(inp.dataset.s), iid = Number(inp.dataset.i);
     let v = inp.value === '' ? null : Math.max(0, Math.min(100, Math.round(Number(inp.value))));
@@ -644,9 +707,9 @@ async function viewBlankList(r) {
 
 async function viewAdmin(tab) {
   const views = { users: adminUsers, classes: adminClasses, students: adminStudents, items: adminItems,
-                  weeks: adminWeeks, settings: adminSettings, log: adminLog };
+                  weeks: adminWeeks, settings: adminSettings, faces: adminFaces, log: adminLog };
   if (!views[tab]) tab = 'students';
-  if (['users', 'items', 'settings'].includes(tab) && !isAdmin()) tab = 'students';
+  if (['users', 'items', 'settings', 'faces'].includes(tab) && !isAdmin()) tab = 'students';
   if (!isStaff()) { location.hash = '#/entry'; return; }
   await views[tab]();
 }
@@ -1013,6 +1076,188 @@ async function adminSettings() {
     state.settings.logo = '';
     adminSettings();
   });
+}
+
+// ---------- admin: face recognition tablet ----------
+
+async function adminFaces() {
+  const d = await api('/api/admin/faces');
+  const kioskUrl = key => `${location.origin}/kiosk#${key}`;
+  const main = shell(`<h1>זיהוי פנים</h1>
+    <p class="sub">עמדת טאבלט שבה תלמידים שאושרו נרשמים לנוכחות מול המצלמה. התמונות עצמן לא נשמרות, רק "טביעה מספרית" של הפנים.</p>
+    <div class="card"><h2>עמדת הטאבלט</h2>
+      <p class="muted">פותחים את הקישור בטאבלט ב-Chrome או ב-Edge, מאשרים שימוש במצלמה, ולוחצים "מסך מלא". אל תפרסם את הקישור.</p>
+      <div class="form-row"><input type="text" id="kiosk" dir="ltr" readonly style="width:100%;max-width:560px" value="${esc(kioskUrl(d.kiosk_key))}">
+        <button class="btn secondary small" id="kcopy">העתקה</button>
+        <a class="btn secondary small" id="kopen" href="${esc(kioskUrl(d.kiosk_key))}" target="_blank">פתיחה</a>
+        <button class="btn ghost small" id="knew">יצירת קישור חדש</button></div>
+      <label class="check-row"><input type="checkbox" id="daily" ${d.daily_mode ? 'checked' : ''}>
+        <span><strong>נוכחות יומית פעילה</strong><br><span class="muted">${d.daily_mode
+          ? 'פעיל: המורים מסמנים לפי ימים, ורישום במצלמה נכנס מיד לנקודות.'
+          : 'כבוי (מצב ניסיון): המורים ממשיכים להזין מספר לשבוע כמו היום. רישומי המצלמה נשמרים ומוצגים כאן, אבל לא משנים נקודות.'}</span></span></label>
+    </div>
+    <div class="card"><h2>תלמידים</h2>
+      <div class="toolbar"><input type="search" id="find" placeholder="חיפוש תלמיד" style="width:200px">
+        <label><input type="checkbox" id="onlyAllowed"> רק מי שרשאי</label>
+        <span class="spacer"></span><span class="muted" id="fcount"></span></div>
+      <div class="table-wrap"><table><thead><tr><th>תלמיד</th><th>קבוצות</th><th class="num">רשאי למצלמה</th><th>פנים</th><th></th></tr></thead>
+        <tbody id="frows"></tbody></table></div></div>
+    <div class="card"><h2>שעות רישום במצלמה</h2>
+      <p class="muted">לכל סעיף: מתי העמדה מתחילה לרשום, עד מתי נחשב "נוכח", ועד מתי "איחר" (0 נקודות, המורה יכול לתקן). אחרי זה לא נרשם כלום. סעיף בלי שעות לא נרשם במצלמה.</p>
+      <div id="wins"></div><button class="btn" id="wsave">שמירת השעות</button></div>
+    <div class="card"><h2>משפטי משוב</h2>
+      <p class="muted">משפט אחד בכל שורה, והמערכת בוחרת אחד באקראי. {שם} מוחלף בשם הפרטי של התלמיד.</p>
+      <div class="grid grid-2">
+        <label class="field">למי שהגיע בזמן<textarea id="gp" rows="5">${esc(d.greetings_present)}</textarea></label>
+        <label class="field">למי שאיחר<textarea id="gl" rows="5">${esc(d.greetings_late)}</textarea></label></div>
+      <button class="btn" id="gsave">שמירת המשפטים</button></div>
+    <div class="card"><h2>נרשמו במצלמה היום</h2>
+      ${d.log.length ? `<div class="table-wrap"><table><thead><tr><th>שעה</th><th>תלמיד</th><th>סעיף</th><th>מצב</th></tr></thead><tbody>
+        ${d.log.map(r => `<tr><td>${esc(r.at)}</td><td>${esc(r.name)}</td><td>${esc(r.item)}</td>
+          <td>${r.status === 'present' ? 'נוכח' : '<span class="late-tag">איחר</span>'}</td></tr>`).join('')}</tbody></table></div>`
+        : '<div class="empty">עדיין אין רישומים היום.</div>'}</div>`);
+
+  main.querySelector('#kcopy').onclick = () => { navigator.clipboard?.writeText(main.querySelector('#kiosk').value); toast('הקישור הועתק'); };
+  main.querySelector('#knew').onclick = async () => {
+    if (!confirm('הקישור הקודם יפסיק לעבוד, וצריך יהיה לפתוח את החדש בטאבלט. להמשיך?')) return;
+    await api('/api/admin/kiosk/regenerate', { body: {} });
+    adminFaces();
+  };
+  main.querySelector('#daily').onchange = async ev => {
+    const on = ev.target.checked;
+    if (!confirm(on
+      ? 'להפעיל נוכחות יומית? המורים יראו מיד ריבועי ימים במקום מספר, ורישומי המצלמה ייכנסו לנקודות. הנקודות שכבר הוזנו לא משתנות.'
+      : 'לכבות נוכחות יומית? המורים יחזרו להזין מספר לשבוע, והמצלמה תעבור למצב ניסיון.')) { ev.target.checked = !on; return; }
+    await api('/api/admin/settings', { method: 'PUT', body: { daily_mode: on ? '1' : '0' } });
+    state.settings.daily_mode = on;
+    toast('נשמר');
+    adminFaces();
+  };
+
+  // students
+  const drawStudents = () => {
+    const q = main.querySelector('#find').value.trim();
+    const only = main.querySelector('#onlyAllowed').checked;
+    const rows = d.students.filter(st => (!q || st.name.includes(q)) && (!only || st.face_allowed));
+    main.querySelector('#fcount').textContent = `${d.students.filter(st => st.face_allowed).length} רשאים · ${d.students.filter(st => st.faces).length} עם פנים רשומות`;
+    main.querySelector('#frows').innerHTML = rows.map(st => `<tr><td>${esc(st.name)}</td><td class="muted">${esc(st.groups)}</td>
+      <td class="num"><input type="checkbox" data-allow="${st.id}" ${st.face_allowed ? 'checked' : ''}></td>
+      <td>${st.faces ? `<span class="ok-tag">רשום</span>` : st.face_allowed ? '<span class="muted">לא נרשם</span>' : ''}</td>
+      <td>${st.face_allowed ? `<button class="btn secondary small" data-enroll="${st.id}">${st.faces ? 'רישום מחדש' : 'רישום פנים'}</button>
+        ${st.faces ? `<button class="btn ghost small" data-unenroll="${st.id}">מחיקת פנים</button>` : ''}` : ''}</td></tr>`).join('')
+      || '<tr><td colspan="5" class="empty">אין תלמידים להצגה</td></tr>';
+    main.querySelectorAll('[data-allow]').forEach(cb => cb.onchange = async () => {
+      const st = d.students.find(x => x.id === Number(cb.dataset.allow));
+      if (!cb.checked && st.faces && !confirm(`להסיר את ${st.name}? הפנים הרשומות שלו יימחקו.`)) { cb.checked = true; return; }
+      await api(`/api/admin/faces/${st.id}`, { method: 'PUT', body: { face_allowed: cb.checked } });
+      st.face_allowed = cb.checked;
+      if (!cb.checked) st.faces = 0;
+      drawStudents();
+    });
+    main.querySelectorAll('[data-enroll]').forEach(b => b.onclick = () =>
+      enrollFace(d.students.find(x => x.id === Number(b.dataset.enroll)), drawStudents));
+    main.querySelectorAll('[data-unenroll]').forEach(b => b.onclick = async () => {
+      const st = d.students.find(x => x.id === Number(b.dataset.unenroll));
+      if (!confirm(`למחוק את הפנים הרשומות של ${st.name}?`)) return;
+      await api(`/api/admin/faces/${st.id}/enroll`, { method: 'DELETE' });
+      st.faces = 0;
+      drawStudents();
+    });
+  };
+  main.querySelector('#find').oninput = drawStudents;
+  main.querySelector('#onlyAllowed').onchange = drawStudents;
+  drawStudents();
+
+  // time windows
+  const wins = d.windows.map(w => ({ ...w, weekday: w.weekday ?? '' }));
+  const drawWindows = () => {
+    main.querySelector('#wins').innerHTML = `<div class="table-wrap"><table><thead><tr><th>סעיף</th><th>יום</th><th>פתיחה</th>
+      <th>נוכח עד</th><th>איחור עד</th><th></th></tr></thead><tbody>
+      ${d.items.map(it => {
+        const mine = wins.filter(w => w.item_id === it.id);
+        const days = it.days.split(',').filter(Boolean).map(Number);
+        const row = (w, first) => `<tr><td>${first ? `<strong>${esc(it.name)}</strong>` : ''}</td>
+          <td><select data-w="${wins.indexOf(w)}" data-f="weekday"><option value="">${days.length > 1 ? 'כל הימים' : 'יום ' + DAYS[days[0]]}</option>
+            ${days.length > 1 ? days.map(n => `<option value="${n}" ${String(w.weekday) === String(n) ? 'selected' : ''}>יום ${DAYS[n]}</option>`).join('') : ''}</select></td>
+          ${['start', 'present_until', 'late_until'].map(f => `<td><input type="time" data-w="${wins.indexOf(w)}" data-f="${f}" value="${w[f]}"></td>`).join('')}
+          <td><button class="btn ghost small" data-wdel="${wins.indexOf(w)}">הסרה</button></td></tr>`;
+        return (mine.length ? mine.map((w, i) => row(w, i === 0)).join('')
+          : `<tr><td><strong>${esc(it.name)}</strong></td><td colspan="4" class="muted">לא נרשם במצלמה</td><td></td></tr>`)
+          + `<tr class="addrow"><td></td><td colspan="5"><button class="btn ghost small" data-wadd="${it.id}">+ ${mine.length ? 'שעה ליום מסוים' : 'הוספת שעות'}</button></td></tr>`;
+      }).join('')}</tbody></table></div>
+      <p class="muted small">שורה של "כל הימים" חלה בכל ימי הסעיף. שורה של יום מסוים (למשל שחרית ביום ו') גוברת עליה באותו יום אם השעות חופפות.</p>`;
+    main.querySelectorAll('#wins [data-f]').forEach(inp => inp.onchange = () => { wins[Number(inp.dataset.w)][inp.dataset.f] = inp.value; });
+    main.querySelectorAll('[data-wdel]').forEach(b => b.onclick = () => { wins.splice(Number(b.dataset.wdel), 1); drawWindows(); });
+    main.querySelectorAll('[data-wadd]').forEach(b => b.onclick = () => {
+      const id = Number(b.dataset.wadd);
+      const prev = wins.find(w => w.item_id === id);
+      wins.push({ item_id: id, weekday: '', start: prev?.start || '', present_until: prev?.present_until || '', late_until: prev?.late_until || '' });
+      drawWindows();
+    });
+  };
+  drawWindows();
+  main.querySelector('#wsave').onclick = async () => {
+    try {
+      await api('/api/admin/windows', { method: 'PUT', body: { windows: wins } });
+      toast('השעות נשמרו');
+    } catch (err) { toast(err.message, 4000); }
+  };
+  main.querySelector('#gsave').onclick = async () => {
+    await api('/api/admin/settings', { method: 'PUT', body: {
+      greetings_present: main.querySelector('#gp').value, greetings_late: main.querySelector('#gl').value } });
+    toast('המשפטים נשמרו');
+  };
+}
+
+// Takes 5 samples of the student's face from the camera of this device and saves them.
+function enrollFace(st, done) {
+  const SAMPLES = 5;
+  const samples = [];
+  let running = true;
+  let face;
+  const dlg = openDialog(`רישום פנים: ${st.name}`, `
+    <p class="muted">התלמיד עומד מול המצלמה במרחק של כחצי מטר, באור טוב ובלי כובע. בין צילום לצילום מזיזים מעט את הראש.</p>
+    <div class="enroll-cam"><video id="ev" playsinline muted></video></div>
+    <div class="enroll-status" id="es">טוען את מנגנון הזיהוי...</div>
+    <div class="enroll-dots">${Array.from({ length: SAMPLES }, (_, i) => `<i id="ed${i}"></i>`).join('')}</div>`,
+    async () => {
+      if (samples.length < SAMPLES) throw new Error('הצילום עוד לא הסתיים');
+      const r = await api(`/api/admin/faces/${st.id}/enroll`, { body: { descriptors: samples } });
+      st.faces = samples.length;
+      done();
+      if (r.similar) toast(`נשמר. שים לב: הפנים דומות מאוד לפנים של ${r.similar}. כדאי לוודא שצולם התלמיד הנכון.`, 7000);
+      else toast('הפנים נרשמו');
+    }, 'שמירה');
+  const video = dlg.querySelector('#ev');
+  const status = dlg.querySelector('#es');
+  dlg.addEventListener('close', () => { running = false; face?.stopCamera(video); });
+  (async () => {
+    try {
+      face = await import('/face.js');
+      await face.loadFaceApi();
+      await face.startCamera(video);
+    } catch (err) { status.textContent = err.message || 'טעינת הזיהוי נכשלה'; return; }
+    status.textContent = 'מחפש פנים...';
+    while (running && samples.length < SAMPLES) {
+      const f = await face.detectFace(video).catch(() => null);
+      if (!f) status.textContent = 'לא נראות פנים. עמוד מול המצלמה.';
+      else if (f.size < 0.16) status.textContent = 'התקרב קצת למצלמה';
+      else if (f.score < 0.7) status.textContent = 'התמונה לא ברורה. כדאי אור טוב יותר.';
+      // each sample should differ a little from the previous one (a slightly different angle)
+      else if (samples.length && face.faceDistance(f.descriptor, samples[samples.length - 1]) < 0.06) status.textContent = 'הזז מעט את הראש';
+      else {
+        samples.push(f.descriptor);
+        dlg.querySelector(`#ed${samples.length - 1}`).classList.add('on');
+        status.textContent = samples.length < SAMPLES ? `צולם ${samples.length} מתוך ${SAMPLES}. הזז מעט את הראש.` : '';
+        await new Promise(r => setTimeout(r, 600));
+      }
+      await new Promise(r => setTimeout(r, 150));
+    }
+    if (samples.length >= SAMPLES) {
+      status.textContent = 'הצילום הסתיים. לחץ "שמירה".';
+      face.stopCamera(video);
+    }
+  })();
 }
 
 async function adminLog() {
