@@ -413,13 +413,16 @@ app.post('/api/entry', wrap(req => {
 const staffOnly = user => { if (user.role === 'teacher') fail(403, 'רק למזכיר ולמנהל'); };
 const hebSort = (a, b) => a.name.localeCompare(b.name, 'he');
 
-function generalContext(date) {
+// reg: 'yes' = only registered students, 'no' = only unregistered, otherwise everyone
+const regFilter = reg => s => reg === 'yes' ? s.registered : reg === 'no' ? !s.registered : true;
+
+function generalContext(date, reg) {
   if (!isDate(date)) fail(400, 'תאריך לא תקין');
   const key = weekStart(date);
   const daysOff = weekDaysOff(key);
   const items = weekItems(key, daysOff).filter(it => it.general);
   const names = new Map(db.prepare('SELECT id, name FROM classes').all().map(c => [c.id, c.name]));
-  const students = db.prepare('SELECT * FROM students WHERE active = 1').all().map(s => ({
+  const students = db.prepare('SELECT * FROM students WHERE active = 1').all().filter(regFilter(reg)).map(s => ({
     id: s.id, first_name: s.first_name, last_name: s.last_name,
     name: `${s.first_name} ${s.last_name}`.trim(),
     morning: names.get(s.morning_class_id) || '', afternoon: names.get(s.afternoon_class_id) || '',
@@ -429,7 +432,7 @@ function generalContext(date) {
 
 app.get('/api/general', wrap(req => {
   staffOnly(req.user);
-  const { key, daysOff, items, students } = generalContext(req.query.date);
+  const { key, daysOff, items, students } = generalContext(req.query.date, req.query.reg);
   return {
     items, students, values: readValues(key, items, students),
     locked: false, future: key > today(),
@@ -611,7 +614,7 @@ app.get('/api/report', wrap(req => {
 
   const students = db.prepare('SELECT * FROM students WHERE active = 1').all().filter(s => group
     ? s[groupColumn(group)] === group.id
-    : !own || own.has(s.morning_class_id) || own.has(s.afternoon_class_id));
+    : !own || own.has(s.morning_class_id) || own.has(s.afternoon_class_id)).filter(regFilter(req.query.reg));
   const ws = week?.start_date;
   const rows = students.map(s => {
     const st = perStudent.get(s.id) || { byWeek: {} };
@@ -754,22 +757,33 @@ app.get('/api/admin/students', staff, wrap(() => ({
 })));
 
 app.post('/api/admin/students', staff, wrap(req => {
-  const { first_name, last_name, morning_class_id, afternoon_class_id, phone } = req.body || {};
+  const { first_name, last_name, morning_class_id, afternoon_class_id, phone, registered } = req.body || {};
   if (!first_name) fail(400, 'יש למלא שם');
   checkPhonesFree(cleanPhones(phone));
-  db.prepare('INSERT INTO students (first_name, last_name, morning_class_id, afternoon_class_id, phone) VALUES (?, ?, ?, ?, ?)')
-    .run(String(first_name).trim(), String(last_name || '').trim(), morning_class_id || null, afternoon_class_id || null, cleanPhones(phone));
+  db.prepare('INSERT INTO students (first_name, last_name, morning_class_id, afternoon_class_id, phone, registered) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(String(first_name).trim(), String(last_name || '').trim(), morning_class_id || null, afternoon_class_id || null,
+         cleanPhones(phone), registered ? 1 : 0);
   audit(req.user.id, 'student-create', `${first_name} ${last_name || ''}`);
   return { ok: true };
 }));
 
 app.put('/api/admin/students/:id', staff, wrap(req => {
-  const { first_name, last_name, morning_class_id, afternoon_class_id, active, phone } = req.body || {};
+  const { first_name, last_name, morning_class_id, afternoon_class_id, active, phone, registered } = req.body || {};
   checkPhonesFree(cleanPhones(phone), Number(req.params.id));
-  db.prepare('UPDATE students SET first_name = ?, last_name = ?, morning_class_id = ?, afternoon_class_id = ?, active = ?, phone = ? WHERE id = ?')
+  db.prepare('UPDATE students SET first_name = ?, last_name = ?, morning_class_id = ?, afternoon_class_id = ?, active = ?, phone = ?, registered = ? WHERE id = ?')
     .run(String(first_name).trim(), String(last_name || '').trim(), morning_class_id || null, afternoon_class_id || null,
-         active ? 1 : 0, cleanPhones(phone), Number(req.params.id));
+         active ? 1 : 0, cleanPhones(phone), registered ? 1 : 0, Number(req.params.id));
   audit(req.user.id, 'student-update', `${first_name} ${last_name || ''}`);
+  return { ok: true };
+}));
+
+// Quick toggle from the students table
+app.put('/api/admin/students/:id/registered', staff, wrap(req => {
+  const s = db.prepare('SELECT first_name, last_name FROM students WHERE id = ?').get(Number(req.params.id));
+  if (!s) fail(404, 'תלמיד לא נמצא');
+  const registered = req.body?.registered ? 1 : 0;
+  db.prepare('UPDATE students SET registered = ? WHERE id = ?').run(registered, Number(req.params.id));
+  audit(req.user.id, 'student-update', `${s.first_name} ${s.last_name} · ${registered ? 'נרשם' : 'לא נרשם'}`);
   return { ok: true };
 }));
 
@@ -777,18 +791,19 @@ app.put('/api/admin/students/:id', staff, wrap(req => {
 // and a group named exactly like a teacher's display name is linked to that teacher.
 // A row whose name matches an existing student only fills in that student's phone, so a list can be re-imported.
 app.post('/api/admin/students/import', staff, wrap(req => {
-  const { rows, phones_only } = req.body || {};
+  const { rows, phones_only, mark_registered } = req.body || {};
   if (!Array.isArray(rows) || !rows.length) fail(400, 'אין שורות לייבוא');
   const notFound = [];
   const groups = new Map(db.prepare('SELECT id, name, shift FROM classes').all().map(c => [`${c.shift}:${c.name.trim()}`, c.id]));
   const teachers = new Map(db.prepare("SELECT id, display_name FROM users WHERE role = 'teacher'").all()
     .map(u => [u.display_name.trim(), u.id]));
   const insGroup = db.prepare('INSERT INTO classes (name, shift, teacher_id) VALUES (?, ?, ?)');
-  const insStudent = db.prepare('INSERT INTO students (first_name, last_name, morning_class_id, afternoon_class_id, phone) VALUES (?, ?, ?, ?, ?)');
+  const insStudent = db.prepare('INSERT INTO students (first_name, last_name, morning_class_id, afternoon_class_id, phone, registered) VALUES (?, ?, ?, ?, ?, ?)');
+  const setRegistered = db.prepare('UPDATE students SET registered = 1 WHERE id = ?');
   const existing = new Map(db.prepare('SELECT id, first_name, last_name FROM students').all()
     .map(s => [`${s.first_name} ${s.last_name}`.replace(/\s+/g, ' ').trim(), s.id]));
   const setPhone = db.prepare('UPDATE students SET phone = ? WHERE id = ?');
-  let added = 0, newGroups = 0, updated = 0;
+  let added = 0, newGroups = 0, updated = 0, registered = 0;
   const groupId = (name, shift) => {
     name = String(name || '').trim();
     if (!name) return null;
@@ -809,19 +824,21 @@ app.post('/api/admin/students/import', staff, wrap(req => {
       const known = existing.get(`${first} ${last}`.replace(/\s+/g, ' ').trim());
       if (known) {
         if (phone) { checkPhonesFree(phone, known); setPhone.run(phone, known); updated++; }
+        if (mark_registered) { setRegistered.run(known); registered++; }
         continue;
       }
       if (phones_only) { notFound.push(`${first} ${last}`.trim()); continue; }
-      insStudent.run(first, last, groupId(r.morning_class, 'morning'), groupId(r.afternoon_class, 'afternoon'), phone);
+      insStudent.run(first, last, groupId(r.morning_class, 'morning'), groupId(r.afternoon_class, 'afternoon'), phone, mark_registered ? 1 : 0);
       added++;
+      if (mark_registered) registered++;
     }
     db.exec('COMMIT');
   } catch (e) {
     db.exec('ROLLBACK');
     throw e;
   }
-  audit(req.user.id, 'student-import', { added, newGroups, updated });
-  return { added, new_classes: newGroups, updated, not_found: notFound };
+  audit(req.user.id, 'student-import', { added, newGroups, updated, registered });
+  return { added, new_classes: newGroups, updated, registered, not_found: notFound };
 }));
 
 app.get('/api/admin/yemot', adminOnly, wrap(() => ({ token: yemotToken() })));

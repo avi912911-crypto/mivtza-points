@@ -128,6 +128,11 @@ db.exec(`CREATE TABLE IF NOT EXISTS class_helpers (
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   PRIMARY KEY (class_id, user_id)
 )`);
+// v6: which students registered for the program (for separate reports), and the Friday/Shabbat
+// items move from the group tables to the secretary's general list.
+if (addColumn('students', 'registered', 'INTEGER NOT NULL DEFAULT 0')) {
+  db.exec("UPDATE items SET general = 1 WHERE shift = 'office'");
+}
 
 function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString('hex');

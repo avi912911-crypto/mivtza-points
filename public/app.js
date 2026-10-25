@@ -486,6 +486,11 @@ const reportTypeSelect = type => isStaff() ? `<select id="r-type">
   <option value="weekly" ${type === 'weekly' ? 'selected' : ''}>דוח שבועי</option>
   <option value="blank" ${type === 'blank' ? 'selected' : ''}>רשימה ריקה למילוי ביד</option></select>` : '';
 
+const REG = { '': 'כל התלמידים', yes: 'רק מי שנרשמו', no: 'רק מי שלא נרשמו' };
+const regSelect = reg => `<select id="r-reg">${Object.entries(REG).map(([k, v]) =>
+  `<option value="${k}" ${k === (reg || '') ? 'selected' : ''}>${v}</option>`).join('')}</select>`;
+const regLabel = reg => reg === 'yes' ? 'נרשמו' : reg === 'no' ? 'לא נרשמו' : '';
+
 // Save-as-PDF through the browser print dialog; the document title becomes the file name.
 function printAsPdf(fileName) {
   const prev = document.title;
@@ -511,12 +516,14 @@ async function viewReport() {
   const q = new URLSearchParams();
   if (r.week) q.set('week', r.week);
   if (r.classId) q.set('class_id', r.classId);
+  if (r.reg) q.set('reg', r.reg);
   const d = await api('/api/report?' + q);
   r.week = d.week?.start_date || '';
   const rows = [...d.rows].sort(REPORT_SORT[r.sort][1]);
   const title = d.week ? `דוח שבועי · ${weekLabel(d.week)}` : 'דוח שבועי';
   const range = d.week ? dateRange(d.week.start_date, addDays(d.week.start_date, 6)) : '';
-  const scope = d.group ? `${d.group.name} · ${SHIFT[d.group.shift]}` : 'כל התלמידים';
+  const scope = [d.group ? `${d.group.name} · ${SHIFT[d.group.shift]}` : (r.reg ? '' : 'כל התלמידים'), regLabel(r.reg)]
+    .filter(Boolean).join(' · ');
   const avg = k => rows.length ? Math.round(rows.reduce((a, x) => a + x[k], 0) / rows.length) : 0;
 
   const main = shell(`<h1>דוחות</h1><p class="sub">בחר שבוע וקבוצה, והורד את הדוח ל-PDF או לאקסל.</p>
@@ -526,6 +533,7 @@ async function viewReport() {
         ${esc(weekLabel(w))} (${shortDate(w.start_date)})${w.vacation ? ' · חופשה' : ''}</option>`).join('')}</select>
       <select id="r-group"><option value="">${state.me.role === 'teacher' ? 'כל התלמידים שלי' : 'כל התלמידים'}</option>
         ${d.groups.map(c => `<option value="${c.id}" ${c.id === r.classId ? 'selected' : ''}>${esc(c.name)} · ${SHIFT[c.shift]}</option>`).join('')}</select>
+      ${isStaff() ? regSelect(r.reg) : ''}
       <select id="r-sort">${Object.entries(REPORT_SORT).map(([k, [label]]) =>
         `<option value="${k}" ${k === r.sort ? 'selected' : ''}>מיון: ${label}</option>`).join('')}</select>
       <span class="spacer"></span>
@@ -561,6 +569,7 @@ async function viewReport() {
   main.querySelector('#r-week').onchange = ev => { r.week = ev.target.value; viewReport(); };
   main.querySelector('#r-group').onchange = ev => { r.classId = Number(ev.target.value) || null; viewReport(); };
   main.querySelector('#r-sort').onchange = ev => { r.sort = ev.target.value; viewReport(); };
+  main.querySelector('#r-reg')?.addEventListener('change', ev => { r.reg = ev.target.value; viewReport(); });
   main.querySelector('#r-print').onclick = () => window.print();
   const fileName = `${title} - ${scope}`.replace(/[\\/:*?"<>|·]/g, '').replace(/\s+/g, ' ').trim();
 
@@ -574,15 +583,16 @@ async function viewReport() {
 
 // All students A-Z with empty columns for the general-list items, to fill in by hand and copy in later.
 async function viewBlankList(r) {
-  const d = await api('/api/general?date=' + (r.week || state.today));
+  const d = await api('/api/general?date=' + (r.week || state.today) + (r.reg ? '&reg=' + r.reg : ''));
   const cols = d.items.length ? d.items.map(it => it.name) : ['נוכחות'];
   const title = `רשימה למילוי · ${cols.join(', ')}`;
   const range = dateRange(d.week_start, addDays(d.week_start, 6));
-  const sub = `${d.week ? weekLabel(d.week) + ' · ' : ''}${range}`;
+  const sub = `${d.week ? weekLabel(d.week) + ' · ' : ''}${range}${r.reg ? ' · ' + regLabel(r.reg) : ''}`;
   const main = shell(`<h1>דוחות</h1><p class="sub">רשימה של כל התלמידים לפי א"ב, עם עמודות ריקות לרישום ביד. אחר כך מעתיקים למסך "רשימה כללית".</p>
     <div class="card no-print"><div class="toolbar">
       ${reportTypeSelect('blank')}
       <input type="date" id="r-date" value="${d.week_start}" title="שבוע">
+      ${regSelect(r.reg)}
       <span class="spacer"></span>
       <button class="btn" id="r-pdf">הורדת PDF</button>
       <button class="btn secondary" id="r-xlsx">הורדת אקסל</button>
@@ -601,9 +611,10 @@ async function viewBlankList(r) {
         <td>${esc(x.morning)}</td><td>${esc(x.afternoon)}</td>${cols.map(() => '<td class="blank-col"></td>').join('')}</tr>`).join('')
         || `<tr><td colspan="${4 + cols.length}" class="empty">אין תלמידים</td></tr>`}</tbody></table>
     </div>`);
-  const fileName = `רשימה למילוי ${cols.join(' ')} ${d.week ? weekLabel(d.week) : ''}`.replace(/[\\/:*?"<>|·]/g, '').replace(/\s+/g, ' ').trim();
+  const fileName = `רשימה למילוי ${cols.join(' ')} ${d.week ? weekLabel(d.week) : ''} ${regLabel(r.reg)}`.replace(/[\\/:*?"<>|·]/g, '').replace(/\s+/g, ' ').trim();
   main.querySelector('#r-type').onchange = ev => { r.type = ev.target.value; viewReport(); };
   main.querySelector('#r-date').onchange = ev => { if (ev.target.value) { r.week = weekStart(ev.target.value); viewReport(); } };
+  main.querySelector('#r-reg').onchange = ev => { r.reg = ev.target.value; viewReport(); };
   main.querySelector('#r-print').onclick = () => window.print();
   main.querySelector('#r-pdf').onclick = () => printAsPdf(fileName);
   main.querySelector('#r-xlsx').onclick = () => downloadSheet([
@@ -712,26 +723,38 @@ async function adminStudents() {
       <input type="text" id="q" placeholder="חיפוש שם">
       <select id="fc"><option value="">כל הקבוצות</option>${classes.map(c =>
         `<option value="${c.id}">${esc(c.name)} · ${SHIFT[c.shift]}</option>`).join('')}</select>
+      <select id="freg"><option value="">נרשמו ולא נרשמו</option><option value="yes">רק נרשמו</option><option value="no">רק לא נרשמו</option></select>
       <label class="check"><input type="checkbox" id="inactive"> הצג לא פעילים</label>
       <span class="spacer"></span><span class="muted" id="count"></span></div>
-      <div class="table-wrap"><table><thead><tr><th>שם</th><th>קבוצת בוקר</th><th>קבוצת אחה"צ</th><th>טלפון</th><th class="num">מצב</th><th></th></tr></thead>
+      <div class="table-wrap"><table><thead><tr><th>שם</th><th>קבוצת בוקר</th><th>קבוצת אחה"צ</th><th>טלפון</th><th class="num">נרשם</th><th class="num">מצב</th><th></th></tr></thead>
       <tbody id="rows"></tbody></table></div></div>`);
   const draw = () => {
     const q = main.querySelector('#q').value.trim();
     const fc = Number(main.querySelector('#fc').value);
     const showInactive = main.querySelector('#inactive').checked;
+    const freg = main.querySelector('#freg').value;
     const list = students.filter(s => (showInactive || s.active)
+      && (!freg || (freg === 'yes') === !!s.registered)
       && (!fc || s.morning_class_id === fc || s.afternoon_class_id === fc)
       && (!q || `${s.first_name} ${s.last_name} ${s.phone}`.includes(q)));
-    main.querySelector('#count').textContent = `${list.length} תלמידים`;
+    main.querySelector('#count').textContent = `${list.length} תלמידים · ${list.filter(s => s.registered).length} נרשמו`;
     main.querySelector('#rows').innerHTML = list.map(s => `<tr>
       <td><a href="#/student/${s.id}">${esc(s.first_name)} ${esc(s.last_name)}</a></td>
       <td>${s.morning_class_name ? esc(s.morning_class_name) : '<span class="badge bad">חסר</span>'}</td>
       <td>${s.afternoon_class_name ? esc(s.afternoon_class_name) : '<span class="badge bad">חסר</span>'}</td>
       <td dir="ltr" style="text-align:right">${esc(s.phone) || '<span class="muted">—</span>'}</td>
+      <td class="num"><input type="checkbox" data-reg="${s.id}" ${s.registered ? 'checked' : ''} title="נרשם"></td>
       <td class="num">${s.active ? '' : '<span class="badge bad">לא פעיל</span>'}</td>
       <td><button class="btn secondary small" data-edit="${s.id}">עריכה</button></td></tr>`).join('')
-      || '<tr><td colspan="6" class="empty">אין תלמידים</td></tr>';
+      || '<tr><td colspan="7" class="empty">אין תלמידים</td></tr>';
+    main.querySelectorAll('[data-reg]').forEach(b => b.onchange = async () => {
+      const s = students.find(x => x.id === Number(b.dataset.reg));
+      try {
+        await api(`/api/admin/students/${s.id}/registered`, { method: 'PUT', body: { registered: b.checked } });
+        s.registered = b.checked ? 1 : 0;
+        main.querySelector('#count').textContent = `${list.length} תלמידים · ${list.filter(x => x.registered).length} נרשמו`;
+      } catch (err) { b.checked = !b.checked; toast(err.message, 4000); }
+    });
     main.querySelectorAll('[data-edit]').forEach(b => b.onclick = () => edit(students.find(s => s.id === Number(b.dataset.edit))));
   };
   const groupOpts = (shift, sel) => '<option value="">—</option>' + classes.filter(c => c.shift === shift).map(c =>
@@ -741,8 +764,10 @@ async function adminStudents() {
     <label class="field">קבוצת בוקר<select name="morning_class_id">${groupOpts('morning', s?.morning_class_id)}</select></label>
     <label class="field">קבוצת אחה"צ<select name="afternoon_class_id">${groupOpts('afternoon', s?.afternoon_class_id)}</select></label>
     <label class="field">טלפון לבדיקת נקודות בקו (כמה מספרים מפרידים בפסיק)<input type="tel" name="phone" dir="ltr" value="${esc(s?.phone)}"></label>
+    <label class="check"><input type="checkbox" name="registered" ${s?.registered ? 'checked' : ''}> נרשם למבצע</label>
     ${s ? `<label class="check"><input type="checkbox" name="active" ${s.active ? 'checked' : ''}> פעיל (הסרה מהרשימה שומרת את הנקודות)</label>` : ''}`;
-  const body = d => ({ ...d, morning_class_id: Number(d.morning_class_id) || null, afternoon_class_id: Number(d.afternoon_class_id) || null });
+  const body = d => ({ ...d, morning_class_id: Number(d.morning_class_id) || null, afternoon_class_id: Number(d.afternoon_class_id) || null,
+    registered: !!d.registered });
   const edit = s => openDialog('עריכת תלמיד', form(s), async d => {
     await api('/api/admin/students/' + s.id, { method: 'PUT', body: { ...body(d), active: !!d.active } });
     adminStudents();
@@ -751,7 +776,7 @@ async function adminStudents() {
     await api('/api/admin/students', { body: body(d) }); adminStudents();
   });
   main.querySelector('#import').onclick = importStudents;
-  ['#q', '#fc', '#inactive'].forEach(sel => main.querySelector(sel).addEventListener('input', draw));
+  ['#q', '#fc', '#freg', '#inactive'].forEach(sel => main.querySelector(sel).addEventListener('input', draw));
   draw();
 }
 
@@ -768,14 +793,16 @@ function importStudents() {
       first_name: cell(r, fi), last_name: cell(r, li), morning_class: cell(r, mi), afternoon_class: cell(r, ai), phone: cell(r, pi),
     })).filter(r => r.first_name);
     const phonesOnly = !!dlg.querySelector('[name=phones_only]')?.checked;
-    const res = await api('/api/admin/students/import', { body: { rows, phones_only: phonesOnly } });
+    const markRegistered = !!dlg.querySelector('[name=mark_registered]')?.checked;
+    const res = await api('/api/admin/students/import', { body: { rows, phones_only: phonesOnly, mark_registered: markRegistered } });
     adminStudents();
     if (phonesOnly) {
-      openDialog('עדכון טלפונים', `<p>עודכנו טלפונים ל-<strong>${res.updated}</strong> תלמידים.</p>${res.not_found.length
+      openDialog('עדכון תלמידים קיימים', `<p>עודכנו טלפונים ל-<strong>${res.updated}</strong> תלמידים.</p>${markRegistered
+        ? `<p>סומנו כנרשמו: <strong>${res.registered}</strong> תלמידים.</p>` : ''}${res.not_found.length
         ? `<p>השמות האלה לא נמצאו במערכת, ולא נוספו (אפשר להוסיף להם טלפון ביד בעריכת תלמיד):</p><p class="muted">${res.not_found.map(esc).join('<br>')}</p>` : ''}`,
         async () => {}, 'סגירה');
     } else {
-      toast(`נוספו ${res.added} תלמידים ו-${res.new_classes} קבוצות חדשות${res.updated ? `, ועודכנו טלפונים ל-${res.updated} תלמידים קיימים` : ''}`, 5000);
+      toast(`נוספו ${res.added} תלמידים ו-${res.new_classes} קבוצות חדשות${res.updated ? `, ועודכנו טלפונים ל-${res.updated} תלמידים קיימים` : ''}${res.registered ? `. סומנו ${res.registered} כנרשמו` : ''}`, 6000);
     }
   }, 'ייבוא');
   dlg.querySelector('#file').onchange = async ev => {
@@ -797,7 +824,8 @@ function importStudents() {
       <label class="field">עמודת קבוצת בוקר<select name="c_morning">${opts(gm, true)}</select></label>
       <label class="field">עמודת קבוצת אחה"צ<select name="c_afternoon">${opts(ga, true)}</select></label>
       <label class="field">עמודת טלפון<select name="c_phone">${opts(gp, true)}</select></label>
-      <label class="check"><input type="checkbox" name="phones_only"> רק לעדכן טלפונים לתלמידים שכבר קיימים (לא להוסיף תלמידים חדשים)</label>
+      <label class="check"><input type="checkbox" name="mark_registered"> כל התלמידים בקובץ נרשמו למבצע (לסמן אותם כנרשמו)</label>
+      <label class="check"><input type="checkbox" name="phones_only"> רק לעדכן תלמידים שכבר קיימים (לא להוסיף תלמידים חדשים)</label>
       <p class="muted">נמצאו ${rows.length - 1} תלמידים. קבוצות שלא קיימות ייווצרו לבד, וקבוצה ששמה זהה לשם של מורה במערכת תשויך אליו.
         תלמיד שכבר קיים במערכת באותו שם לא ייווסף שוב, רק יעודכן לו הטלפון.</p>`;
   };
