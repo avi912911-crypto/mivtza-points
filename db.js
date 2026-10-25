@@ -148,6 +148,24 @@ db.exec(`CREATE TABLE IF NOT EXISTS attendance (
   PRIMARY KEY (student_id, item_id, date)
 )`);
 db.exec('CREATE INDEX IF NOT EXISTS attendance_date ON attendance(date)');
+// v8: face recognition at the tablet. Only students marked face_allowed may enrol; a face is kept as
+// a few 128-number descriptors (JSON), never as a picture. A window is when an item can be checked in
+// at the tablet: present until present_until, late until late_until. weekday NULL = every day of the item.
+addColumn('students', 'face_allowed', 'INTEGER NOT NULL DEFAULT 0');
+db.exec(`CREATE TABLE IF NOT EXISTS face_descriptors (
+  id INTEGER PRIMARY KEY,
+  student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  descriptor TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS item_windows (
+  id INTEGER PRIMARY KEY,
+  item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+  weekday INTEGER,
+  start TEXT NOT NULL,
+  present_until TEXT NOT NULL,
+  late_until TEXT NOT NULL
+)`);
 
 function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString('hex');
@@ -172,6 +190,11 @@ const DEFAULT_SETTINGS = {
     { min: 80, points: 40 },
     { min: 70, points: 30 },
   ]),
+  // 1 = teachers mark days and camera check-ins count for points; 0 = weekly counts, camera on trial
+  daily_mode: '0',
+  // one sentence per line, {שם} = the student's first name
+  greetings_present: 'שלום {שם}, כל הכבוד!\nיישר כוח {שם}!\nברוך הבא {שם}, המשך כך!',
+  greetings_late: '{שם}, נרשמת באיחור. בפעם הבאה מקדימים!',
 };
 
 const DEFAULT_ITEMS = [

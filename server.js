@@ -8,6 +8,9 @@ const app = express();
 app.set('trust proxy', 1);
 app.use(express.json({ limit: '5mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
+// face recognition library and its models, served from the package so the tablet needs no other site
+const FACE_API = path.join(__dirname, 'node_modules', '@vladmandic', 'face-api');
+app.use('/vendor/face-api', express.static(path.join(FACE_API, 'dist')), express.static(FACE_API));
 
 const SESSION_DAYS = 30;
 const PARASHOT = [
@@ -92,32 +95,48 @@ function itemDates(item, ws, daysOff) {
     .map(date => ({ date, off: daysOff.has(date) }));
 }
 
-// Daily attendance (v7) replaced the weekly counts as what teachers enter. Counts entered before
-// that are spread once over the item's first study days of their week, so every week shows days.
-// The counts themselves, and so the points, stay exactly as they were.
-function spreadLegacyCounts() {
-  if (getSettings().attendance_mode === 'daily') return;
-  const rows = db.prepare(`SELECT e.*, i.days FROM entries e JOIN items i ON i.id = e.item_id
-    WHERE i.kind = 'daily' AND NOT EXISTS (SELECT 1 FROM attendance a WHERE a.student_id = e.student_id
-      AND a.item_id = e.item_id AND a.date BETWEEN e.date AND date(e.date, '+6 days'))`).all();
+const dailyMode = () => getSettings().daily_mode === '1';
+
+// With daily_mode on, teachers mark days and the weekly count follows them. While it is off, teachers
+// keep entering counts. Turning it on lines the days up with the counts: a week whose days (teacher or
+// legacy) don't add up to its count is refilled over the item's first study days. Camera marks stay,
+// and the counts themselves, and so the points, stay exactly as they were.
+function reconcileDays() {
+  const rows = db.prepare(`SELECT e.*, i.days FROM entries e JOIN items i ON i.id = e.item_id WHERE i.kind = 'daily'`).all();
+  const marks = db.prepare(`SELECT date, status, source FROM attendance WHERE student_id = ? AND item_id = ? AND date BETWEEN ? AND ?`);
+  const clear = db.prepare(`DELETE FROM attendance WHERE student_id = ? AND item_id = ? AND date BETWEEN ? AND ? AND source != 'camera'`);
   const ins = db.prepare(`INSERT OR IGNORE INTO attendance (student_id, item_id, date, status, source, updated_by, updated_at)
     VALUES (?, ?, ?, 'present', 'legacy', ?, ?)`);
+  let fixed = 0;
   db.exec('BEGIN');
   try {
     for (const r of rows) {
       const ws = weekStart(r.date);
-      const open = itemDates(r, ws, weekDaysOff(ws)).filter(d => !d.off);
-      for (const d of open.slice(0, r.value)) ins.run(r.student_id, r.item_id, d.date, r.updated_by, r.updated_at);
+      const args = [r.student_id, r.item_id, ws, addDays(ws, 6)];
+      if (marks.all(...args).filter(m => m.status === 'present').length === r.value) continue;
+      clear.run(...args);
+      const left = marks.all(...args);
+      let n = left.filter(m => m.status === 'present').length;
+      for (const d of itemDates(r, ws, weekDaysOff(ws))) {
+        if (n >= r.value) break;
+        if (d.off || left.some(m => m.date === d.date)) continue;
+        ins.run(r.student_id, r.item_id, d.date, r.updated_by, r.updated_at);
+        n++;
+      }
+      fixed++;
     }
-    db.prepare(`INSERT OR REPLACE INTO settings (key, value) VALUES ('attendance_mode', 'daily')`).run();
+    // days a teacher marked in a week whose count was later cleared while daily_mode was off
+    db.exec(`DELETE FROM attendance WHERE source != 'camera' AND item_id IN (SELECT id FROM items WHERE kind = 'daily')
+      AND NOT EXISTS (SELECT 1 FROM entries e WHERE e.student_id = attendance.student_id AND e.item_id = attendance.item_id
+        AND e.date = date(attendance.date, '-' || strftime('%w', attendance.date) || ' days'))`);
     db.exec('COMMIT');
   } catch (e) {
     db.exec('ROLLBACK');
     throw e;
   }
-  if (rows.length) console.log(`Spread ${rows.length} weekly counts into daily attendance`);
+  if (fixed) console.log(`Lined up the days of ${fixed} weekly counts`);
 }
-spreadLegacyCounts();
+if (dailyMode()) reconcileDays();
 
 // How many study days of the week an item can be attended on (its weekdays, minus days off).
 function maxCount(item, ws, daysOff) {
@@ -283,13 +302,109 @@ app.all('/yemot/points', express.urlencoded({ extended: false }), (req, res) => 
   }
 });
 
+// ---------- face recognition tablet (kiosk) ----------
+// The tablet has no user; it holds a secret key in its address (after #), like the Yemot line.
+
+function kioskKey() {
+  let t = getSettings().kiosk_key;
+  if (!t) {
+    t = crypto.randomBytes(12).toString('hex');
+    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('kiosk_key', ?)").run(t);
+  }
+  return t;
+}
+function kioskAuth(req, res, next) {
+  if (req.get('X-Kiosk-Key') === kioskKey()) return next();
+  res.status(403).json({ error: 'קוד העמדה לא תקין. יש לפתוח מחדש את הקישור מעמוד "זיהוי פנים".' });
+}
+
+// Date, time (HH:MM) and weekday in Israel for a moment in time
+function israelTime(at) {
+  const p = Object.fromEntries(new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Jerusalem', year: 'numeric', month: '2-digit',
+    day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(at).map(x => [x.type, x.value]));
+  const date = `${p.year}-${p.month}-${p.day}`;
+  return { date, time: `${p.hour}:${p.minute}`, wd: weekday(date) };
+}
+
+function pickLine(text, name) {
+  const lines = String(text || '').split('\n').map(l => l.trim()).filter(Boolean);
+  const line = lines.length ? lines[Math.floor(Math.random() * lines.length)] : 'שלום {שם}';
+  return line.replaceAll('{שם}', name);
+}
+
+// The window open at this moment, if any: its item has a lesson that day and the day is not off.
+function openWindow(t) {
+  if (db.prepare('SELECT 1 FROM days_off WHERE date = ?').get(t.date)) return null;
+  return db.prepare(`SELECT w.*, i.name, i.kind, i.days FROM item_windows w JOIN items i ON i.id = w.item_id
+      WHERE i.active = 1 AND i.kind != 'exam' AND (w.weekday IS NULL OR w.weekday = ?) AND ? BETWEEN w.start AND w.late_until
+      ORDER BY w.start`).all(t.wd, t.time)
+    .find(w => w.days.split(',').includes(String(t.wd))) || null;
+}
+
+// Records a check-in. A day already marked (by the teacher or an earlier check-in) is left as it is.
+// In daily mode the mark counts at once; before that the camera runs on trial and points don't change.
+function cameraCheckin(student, at) {
+  const t = israelTime(at);
+  const w = openWindow(t);
+  if (!w) return { status: 'none' };
+  const existing = db.prepare('SELECT status, source FROM attendance WHERE student_id = ? AND item_id = ? AND date = ?').get(student.id, w.item_id, t.date);
+  const status = t.time <= w.present_until ? 'present' : 'late';
+  // On trial only the camera's own marks count as "already"; a day the teacher marked is left alone.
+  if (existing && (dailyMode() || existing.source === 'camera')) return { status: 'already', item: w.name, marked: existing.status };
+  if (existing) return { status, item: w.name };
+  const now = new Date().toISOString();
+  db.prepare(`INSERT INTO attendance (student_id, item_id, date, status, source, at, updated_at)
+    VALUES (?, ?, ?, ?, 'camera', ?, ?)`).run(student.id, w.item_id, t.date, status, t.time, now);
+  if (dailyMode()) {
+    const ws = weekStart(t.date);
+    if (w.kind === 'daily') syncCount(student.id, w.item_id, ws, null, now);
+    else if (status === 'present') db.prepare(`INSERT OR IGNORE INTO entries (student_id, item_id, date, value, updated_by, updated_at)
+      VALUES (?, ?, ?, 1, NULL, ?)`).run(student.id, w.item_id, ws, now);
+  }
+  return { status, item: w.name };
+}
+
+app.get('/kiosk/api/data', kioskAuth, wrap(() => {
+  const s = getSettings();
+  const faces = new Map();
+  for (const f of db.prepare(`SELECT f.student_id, f.descriptor FROM face_descriptors f JOIN students st ON st.id = f.student_id
+                              WHERE st.active = 1 AND st.face_allowed = 1`).all()) {
+    if (!faces.has(f.student_id)) faces.set(f.student_id, []);
+    faces.get(f.student_id).push(JSON.parse(f.descriptor));
+  }
+  const students = db.prepare('SELECT id, first_name, last_name FROM students WHERE id IN (' + [...faces.keys()].map(() => '?').join(',') + ')')
+    .all(...faces.keys()).map(st => ({ id: st.id, first_name: st.first_name, name: `${st.first_name} ${st.last_name}`.trim(), descriptors: faces.get(st.id) }));
+  return { program_name: s.program_name, logo: s.logo, target: Number(s.target), trial: s.daily_mode !== '1', students };
+}));
+
+app.post('/kiosk/api/checkin', kioskAuth, wrap(req => {
+  const { student_id, at } = req.body || {};
+  const student = db.prepare('SELECT * FROM students WHERE id = ? AND active = 1 AND face_allowed = 1').get(Number(student_id));
+  if (!student) fail(404, 'התלמיד לא רשאי להירשם במצלמה');
+  // A check-in queued while the tablet was offline carries its own time (up to a day back)
+  let when = new Date();
+  if (at) {
+    const d = new Date(at);
+    if (!isNaN(d) && d <= when && when - d < 86400000) when = d;
+  }
+  const result = cameraCheckin(student, when);
+  const s = getSettings();
+  const { perStudent, weeks, target } = computeTotals();
+  const st = perStudent.get(student.id) || { total: 0, byWeek: {} };
+  const cur = progressInfo(weeks, target).current;
+  const greeting = pickLine(result.status === 'late' ? s.greetings_late : s.greetings_present, student.first_name);
+  audit(null, 'camera', { student: student.id, ...result });
+  return { ...result, greeting, name: `${student.first_name} ${student.last_name}`.trim(),
+           week: cur ? st.byWeek[cur.start_date] || 0 : null, total: st.total, target, trial: s.daily_mode !== '1' };
+}));
+
 app.use('/api', auth);
 
 app.get('/api/me', wrap(req => {
   const s = getSettings();
   return {
     user: publicUser(req.user),
-    settings: { program_name: s.program_name, logo: s.logo, target: Number(s.target),
+    settings: { program_name: s.program_name, logo: s.logo, target: Number(s.target), daily_mode: s.daily_mode === '1',
                 edit_days: Number(s.edit_days), exam_rules: JSON.parse(s.exam_rules) },
     today: today(),
   };
@@ -369,7 +484,7 @@ function entryContext(req, classId, date) {
 function weekItems(key, daysOff) {
   return db.prepare('SELECT * FROM items WHERE active = 1 ORDER BY sort, id').all()
     .map(it => ({ ...it, max: it.kind === 'daily' ? maxCount(it, key, daysOff) : it.kind === 'weekly' ? 1 : 100,
-                  dates: it.kind === 'daily' ? itemDates(it, key, daysOff) : undefined }))
+                  dates: it.kind === 'daily' && dailyMode() ? itemDates(it, key, daysOff) : undefined }))
     .filter(it => it.max > 0);
 }
 
@@ -389,7 +504,7 @@ function readValues(key, items, students) {
 // Daily items: att['student:item'] = { date: [status, source] }
 function readAttendance(key, items, students) {
   const att = {};
-  const daily = items.filter(i => i.kind === 'daily');
+  const daily = items.filter(i => i.dates);
   if (daily.length && students.length) {
     const rows = db.prepare(`SELECT student_id, item_id, date, status, source FROM attendance
       WHERE date BETWEEN ? AND ? AND item_id IN (${daily.map(() => '?').join(',')})
@@ -430,7 +545,7 @@ function saveChanges(user, items, studentIds, key, changes) {
     for (const c of changes) {
       const item = allowedItems.get(Number(c.item_id));
       if (!item || !studentIds.has(Number(c.student_id))) fail(400, 'שינוי לא מורשה');
-      if (item.kind === 'daily') {
+      if (item.dates) {
         // A page loaded before daily attendance sends counts; it has to be reloaded.
         if (!item.dates.some(d => d.date === c.date && !d.off)) fail(400, 'יש לרענן את הדף (ריענון: F5)');
         if (c.date > t) fail(400, 'אי אפשר לסמן יום שעוד לא הגיע');
@@ -947,7 +1062,8 @@ app.put('/api/admin/items/:id', adminOnly, wrap(req => {
 }));
 
 app.put('/api/admin/settings', adminOnly, wrap(req => {
-  const allowed = ['program_name', 'target', 'edit_days', 'logo', 'exam_rules'];
+  const allowed = ['program_name', 'target', 'edit_days', 'logo', 'exam_rules', 'daily_mode', 'greetings_present', 'greetings_late'];
+  const wasDaily = dailyMode();
   const up = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value');
   for (const k of allowed) {
     if (!(k in (req.body || {}))) continue;
@@ -957,10 +1073,118 @@ app.put('/api/admin/settings', adminOnly, wrap(req => {
       v = JSON.stringify(v.map(r => ({ min: Number(r.min), points: Number(r.points) })).sort((a, b) => b.min - a.min));
     }
     if (k === 'logo' && v && !/^data:image\//.test(v)) fail(400, 'קובץ לוגו לא תקין');
+    if (k === 'daily_mode') v = v === true || v === '1' ? '1' : '0';
     up.run(k, String(v));
   }
+  if (!wasDaily && dailyMode()) reconcileDays();
   audit(req.user.id, 'settings', Object.keys(req.body || {}).filter(k => k !== 'logo').join(','));
   return { ok: true };
+}));
+
+// ---------- admin: face recognition ----------
+
+const TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
+const faceDistance = (a, b) => Math.sqrt(a.reduce((acc, x, i) => acc + (x - b[i]) ** 2, 0));
+
+app.get('/api/admin/faces', adminOnly, wrap(() => {
+  const s = getSettings();
+  const counts = new Map(db.prepare('SELECT student_id, COUNT(*) AS n FROM face_descriptors GROUP BY student_id').all().map(r => [r.student_id, r.n]));
+  const names = new Map(db.prepare('SELECT id, name FROM classes').all().map(c => [c.id, c.name]));
+  const students = db.prepare('SELECT * FROM students WHERE active = 1').all().map(st => ({
+    id: st.id, name: `${st.first_name} ${st.last_name}`.trim(), face_allowed: !!st.face_allowed, faces: counts.get(st.id) || 0,
+    groups: [names.get(st.morning_class_id), names.get(st.afternoon_class_id)].filter(Boolean).join(' · '),
+  })).sort((a, b) => a.name.localeCompare(b.name, 'he'));
+  const items = db.prepare(`SELECT id, name, kind, days FROM items WHERE active = 1 AND kind != 'exam' AND days != '6' ORDER BY sort, id`).all();
+  const t = israelTime(new Date());
+  const log = db.prepare(`SELECT a.*, st.first_name, st.last_name, i.name AS item FROM attendance a
+      JOIN students st ON st.id = a.student_id JOIN items i ON i.id = a.item_id
+      WHERE a.source = 'camera' AND a.date = ? ORDER BY a.at DESC`).all(t.date)
+    .map(r => ({ name: `${r.first_name} ${r.last_name}`.trim(), item: r.item, status: r.status, at: r.at }));
+  return {
+    students, items, windows: db.prepare('SELECT * FROM item_windows ORDER BY item_id, weekday IS NOT NULL, weekday, start').all(),
+    kiosk_key: kioskKey(), daily_mode: s.daily_mode === '1',
+    greetings_present: s.greetings_present, greetings_late: s.greetings_late, log, now: t,
+  };
+}));
+
+app.put('/api/admin/faces/:id', adminOnly, wrap(req => {
+  const id = Number(req.params.id);
+  const allowed = req.body?.face_allowed ? 1 : 0;
+  db.prepare('UPDATE students SET face_allowed = ? WHERE id = ?').run(allowed, id);
+  if (!allowed) db.prepare('DELETE FROM face_descriptors WHERE student_id = ?').run(id);
+  audit(req.user.id, 'face-allowed', { student: id, allowed });
+  return { ok: true };
+}));
+
+// Enrolment replaces the student's descriptors. similar = another student whose face is very close,
+// so the admin can check that the right person stood at the camera.
+app.post('/api/admin/faces/:id/enroll', adminOnly, wrap(req => {
+  const id = Number(req.params.id);
+  const st = db.prepare('SELECT * FROM students WHERE id = ? AND active = 1').get(id);
+  if (!st?.face_allowed) fail(400, 'יש לסמן קודם שהתלמיד רשאי לזיהוי פנים');
+  const list = req.body?.descriptors;
+  if (!Array.isArray(list) || list.length < 3 || list.length > 10
+      || !list.every(d => Array.isArray(d) && d.length === 128 && d.every(Number.isFinite))) fail(400, 'נתוני הפנים לא תקינים');
+  const desc = list.map(d => d.map(x => Math.round(x * 1e5) / 1e5));
+  let similar = null, best = 0.45;
+  for (const f of db.prepare(`SELECT f.descriptor, s.first_name, s.last_name FROM face_descriptors f
+                              JOIN students s ON s.id = f.student_id WHERE f.student_id != ?`).all(id)) {
+    const other = JSON.parse(f.descriptor);
+    for (const d of desc) {
+      const dist = faceDistance(d, other);
+      if (dist < best) { best = dist; similar = `${f.first_name} ${f.last_name}`.trim(); }
+    }
+  }
+  const now = new Date().toISOString();
+  db.exec('BEGIN');
+  try {
+    db.prepare('DELETE FROM face_descriptors WHERE student_id = ?').run(id);
+    const ins = db.prepare('INSERT INTO face_descriptors (student_id, descriptor, created_at) VALUES (?, ?, ?)');
+    for (const d of desc) ins.run(id, JSON.stringify(d), now);
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+  audit(req.user.id, 'face-enroll', { student: id, samples: desc.length });
+  return { ok: true, similar };
+}));
+
+app.delete('/api/admin/faces/:id/enroll', adminOnly, wrap(req => {
+  db.prepare('DELETE FROM face_descriptors WHERE student_id = ?').run(Number(req.params.id));
+  audit(req.user.id, 'face-delete', { student: Number(req.params.id) });
+  return { ok: true };
+}));
+
+app.put('/api/admin/windows', adminOnly, wrap(req => {
+  const list = req.body?.windows;
+  if (!Array.isArray(list)) fail(400, 'נתונים חסרים');
+  const items = new Map(db.prepare('SELECT id, name FROM items').all().map(i => [i.id, i.name]));
+  for (const w of list) {
+    const name = items.get(Number(w.item_id));
+    if (!name) fail(400, 'סעיף לא קיים');
+    if (![w.start, w.present_until, w.late_until].every(x => TIME.test(x))) fail(400, `יש למלא שעות תקינות ב${name}`);
+    if (!(w.start <= w.present_until && w.present_until <= w.late_until)) fail(400, `ב${name} השעות צריכות להיות לפי הסדר: פתיחה, סוף נוכחות, סוף איחור`);
+    if (w.weekday != null && w.weekday !== '' && !(Number(w.weekday) >= 0 && Number(w.weekday) <= 6)) fail(400, 'יום לא תקין');
+  }
+  db.exec('BEGIN');
+  try {
+    db.exec('DELETE FROM item_windows');
+    const ins = db.prepare('INSERT INTO item_windows (item_id, weekday, start, present_until, late_until) VALUES (?, ?, ?, ?, ?)');
+    for (const w of list) ins.run(Number(w.item_id), w.weekday == null || w.weekday === '' ? null : Number(w.weekday), w.start, w.present_until, w.late_until);
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+  audit(req.user.id, 'windows', { count: list.length });
+  return { ok: true };
+}));
+
+app.post('/api/admin/kiosk/regenerate', adminOnly, wrap(req => {
+  db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('kiosk_key', ?)").run(crypto.randomBytes(12).toString('hex'));
+  audit(req.user.id, 'kiosk-key', '');
+  return { kiosk_key: kioskKey() };
 }));
 
 // ---------- admin: weeks + days off ----------
@@ -1030,6 +1254,7 @@ app.get('/api/admin/audit', staff, wrap(() => ({
 })));
 
 app.use('/api', (req, res) => res.status(404).json({ error: 'לא נמצא' }));
+app.get('/kiosk', (req, res) => res.sendFile(path.join(__dirname, 'public', 'kiosk.html')));
 app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
 backup();
