@@ -227,11 +227,13 @@ function seed() {
   // Without ADMIN_PASSWORD the first visitor to the site creates the admin account (see /api/setup).
   if (process.env.ADMIN_PASSWORD && db.prepare('SELECT COUNT(*) AS n FROM users').get().n === 0) {
     db.prepare(`INSERT INTO users (username, password_hash, display_name, role, can_office, must_change)
-                VALUES (?, ?, 'מנהל', 'admin', 1, 1)`)
+                VALUES (?, ?, 'מנהל', 'admin', 1, 0)`)
       .run(process.env.ADMIN_USERNAME || 'admin', hashPassword(process.env.ADMIN_PASSWORD));
   }
 }
 seed();
+// Nobody is asked to replace the password they were given (the forced change confused teachers).
+db.exec('UPDATE users SET must_change = 0 WHERE must_change = 1');
 
 function getSettings() {
   const out = {};

@@ -101,8 +101,8 @@ async function renderLogin() {
     <p class="sub">${setup ? 'הגדרה ראשונה: צור את חשבון המנהל' : 'מערכת עדכון נקודות'}</p>
     <form id="login">
       ${setup ? '<label class="field">השם שלך<input type="text" name="display_name" required></label>' : ''}
-      <label class="field">שם משתמש${setup ? ' (באנגלית)' : ''}<input type="text" name="username" dir="ltr" autocomplete="username" required></label>
-      <label class="field">סיסמה${setup ? ' (לפחות 6 תווים)' : ''}<input type="password" name="password" minlength="${setup ? 6 : 1}" autocomplete="${setup ? 'new-password' : 'current-password'}" required></label>
+      <label class="field">שם משתמש${setup ? ' (באנגלית)' : ''}<input type="text" name="username" dir="ltr" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" required></label>
+      <label class="field">סיסמה${setup ? ' (לפחות 6 תווים)' : ''}<input type="password" name="password" dir="ltr" minlength="${setup ? 6 : 1}" autocomplete="${setup ? 'new-password' : 'current-password'}" required></label>
       <div class="error"></div>
       <button class="btn">${setup ? 'יצירת חשבון וכניסה' : 'כניסה'}</button>
     </form></div></div>`;
@@ -146,13 +146,12 @@ function shell(content) {
     <main id="main">${content}</main>`;
   document.getElementById('menu').onclick = () => document.getElementById('nav').classList.toggle('open');
   document.getElementById('logout').onclick = async () => { await api('/api/logout', { body: {} }); state.me = null; renderLogin(); };
-  document.getElementById('pw').onclick = () => changePassword(false);
+  document.getElementById('pw').onclick = () => changePassword();
   return document.getElementById('main');
 }
 
-function changePassword(forced) {
-  const dlg = openDialog(forced ? 'יש לבחור סיסמה חדשה' : 'החלפת סיסמה', `
-    ${forced ? '<p class="muted">זו הכניסה הראשונה שלך. בחר סיסמה אישית.</p>' : ''}
+function changePassword() {
+  openDialog('החלפת סיסמה', `
     <label class="field">סיסמה נוכחית<input type="password" name="current" required></label>
     <label class="field">סיסמה חדשה (לפחות 6 תווים)<input type="password" name="password" minlength="6" required></label>`,
     async data => {
@@ -160,7 +159,6 @@ function changePassword(forced) {
       state.me.must_change = false;
       toast('הסיסמה עודכנה');
     });
-  if (forced) dlg.addEventListener('cancel', e => e.preventDefault());
 }
 
 // ---------- router ----------
@@ -190,7 +188,6 @@ async function boot() {
   // Every login or reopening of the site starts on the dashboard, not the last page visited.
   history.replaceState(null, '', '#/dashboard');
   await route();
-  if (state.me.must_change) changePassword(true);
 }
 
 // ---------- entry (weekly table) ----------
@@ -1262,7 +1259,7 @@ function enrollFace(st, done) {
 
 async function adminLog() {
   const { rows } = await api('/api/admin/audit');
-  const ACT = { entry: 'הזנת נקודות', 'entry-move': 'העברת הזנה לשבוע אחר', 'phone-check': 'בדיקת נקודות בטלפון', bonus: 'נקודות מיוחדות', 'bonus-delete': 'מחיקת נקודות מיוחדות', 'user-create': 'משתמש חדש',
+  const ACT = { entry: 'הזנת נקודות', 'login-failed': 'כניסה שנכשלה', 'entry-move': 'העברת הזנה לשבוע אחר', 'phone-check': 'בדיקת נקודות בטלפון', bonus: 'נקודות מיוחדות', 'bonus-delete': 'מחיקת נקודות מיוחדות', 'user-create': 'משתמש חדש',
     'user-update': 'עדכון משתמש', 'class-create': 'קבוצה חדשה', 'class-update': 'עדכון קבוצה', 'class-delete': 'מחיקת קבוצה',
     'student-create': 'תלמיד חדש', 'student-update': 'עדכון תלמיד', 'student-import': 'ייבוא תלמידים', 'item-create': 'סעיף חדש',
     'item-update': 'עדכון סעיף', settings: 'הגדרות', 'weeks-generate': 'יצירת שבועות', 'week-update': 'עדכון שבוע', 'day-off': 'יום ללא לימודים' };
