@@ -175,10 +175,26 @@ app.post('/api/setup', wrap((req, res) => {
   return { user: publicUser(user) };
 }));
 
+// Text typed while the keyboard was on Hebrew, turned back into the English keys that were pressed.
+const HEB_KEYS = { 'ק': 'e', 'ר': 'r', 'א': 't', 'ט': 'y', 'ו': 'u', 'ן': 'i', 'ם': 'o', 'פ': 'p', 'ש': 'a', 'ד': 's',
+  'ג': 'd', 'כ': 'f', 'ע': 'g', 'י': 'h', 'ח': 'j', 'ל': 'k', 'ך': 'l', 'ף': ';', 'ז': 'z', 'ס': 'x', 'ב': 'c', 'ה': 'v',
+  'נ': 'b', 'מ': 'n', 'צ': 'm', 'ת': ',', 'ץ': '.', '/': 'q', "'": 'w' };
+const hasHebrew = t => /[\u05d0-\u05ea]/.test(t);
+const fromHebKeys = t => [...t].map(c => HEB_KEYS[c] ?? c).join('');
+
+// Forgiving login: the username ignores upper/lower case (phones capitalise the first letter), and a
+// username or password typed with the keyboard left on Hebrew is also tried as the English keys.
 app.post('/api/login', wrap((req, res) => {
   const { username, password } = req.body || {};
-  const user = db.prepare('SELECT * FROM users WHERE username = ? AND active = 1').get(String(username || '').trim());
-  if (!user || !checkPassword(String(password || ''), user.password_hash)) fail(401, 'שם משתמש או סיסמה שגויים');
+  const name = String(username || '').trim();
+  const pass = String(password || '');
+  const find = n => db.prepare('SELECT * FROM users WHERE username = ? COLLATE NOCASE AND active = 1').get(n);
+  const user = find(name) || (hasHebrew(name) ? find(fromHebKeys(name)) : null);
+  const ok = user && (checkPassword(pass, user.password_hash) || (hasHebrew(pass) && checkPassword(fromHebKeys(pass), user.password_hash)));
+  if (!ok) {
+    audit(user?.id ?? null, 'login-failed', user ? user.username : name.slice(0, 40));
+    fail(401, 'שם משתמש או סיסמה שגויים');
+  }
   startSession(req, res, user);
   return { user: publicUser(user) };
 }));
@@ -707,9 +723,10 @@ app.post('/api/admin/users', adminOnly, wrap(req => {
   if (!username || !display_name || !password) fail(400, 'יש למלא שם משתמש, שם וסיסמה');
   if (!['admin', 'secretary', 'teacher'].includes(role)) fail(400, 'תפקיד לא תקין');
   if (String(password).length < 6) fail(400, 'הסיסמה צריכה להיות לפחות 6 תווים');
-  if (db.prepare('SELECT 1 FROM users WHERE username = ?').get(String(username).trim())) fail(400, 'שם המשתמש כבר קיים');
+  if (db.prepare('SELECT 1 FROM users WHERE username = ? COLLATE NOCASE').get(String(username).trim())) fail(400, 'שם המשתמש כבר קיים');
+  if (hasHebrew(String(username))) fail(400, 'שם המשתמש צריך להיות באנגלית');
   db.prepare(`INSERT INTO users (username, password_hash, display_name, role, can_office, must_change)
-              VALUES (?, ?, ?, ?, ?, 1)`)
+              VALUES (?, ?, ?, ?, ?, 0)`)
     .run(String(username).trim(), hashPassword(String(password)), display_name, role, can_office ? 1 : 0);
   // Groups imported under this teacher's name are linked to the new account
   if (role === 'teacher') {
@@ -726,11 +743,11 @@ app.put('/api/admin/users/:id', adminOnly, wrap(req => {
   const u = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
   if (!u) fail(404, 'משתמש לא נמצא');
   if (id === req.user.id && (role !== 'admin' || !active)) fail(400, 'אי אפשר להוריד הרשאת מנהל מעצמך');
+  if (password && String(password).length < 6) fail(400, 'הסיסמה צריכה להיות לפחות 6 תווים');
   db.prepare('UPDATE users SET display_name = ?, role = ?, can_office = ?, active = ? WHERE id = ?')
     .run(display_name || u.display_name, role || u.role, can_office ? 1 : 0, active ? 1 : 0, id);
   if (password) {
-    if (String(password).length < 6) fail(400, 'הסיסמה צריכה להיות לפחות 6 תווים');
-    db.prepare('UPDATE users SET password_hash = ?, must_change = 1 WHERE id = ?').run(hashPassword(String(password)), id);
+    db.prepare('UPDATE users SET password_hash = ?, must_change = 0 WHERE id = ?').run(hashPassword(String(password)), id);
     db.prepare('DELETE FROM sessions WHERE user_id = ? AND user_id != ?').run(id, req.user.id);
   }
   if (!active) db.prepare('DELETE FROM sessions WHERE user_id = ?').run(id);
