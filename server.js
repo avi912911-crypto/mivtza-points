@@ -285,7 +285,11 @@ function checkPhonesFree(phones, exceptId) {
   }
 }
 
+// The phone line's secret: YEMOT_TOKEN from Railway's variables when set, otherwise one generated
+// and kept in the settings table (shown to the admin on the settings page).
+const yemotFromEnv = () => !!process.env.YEMOT_TOKEN;
 function yemotToken() {
+  if (yemotFromEnv()) return process.env.YEMOT_TOKEN;
   let t = getSettings().yemot_token;
   if (!t) {
     t = crypto.randomBytes(12).toString('hex');
@@ -295,32 +299,33 @@ function yemotToken() {
 }
 
 // Yemot calls this with the caller's number (ApiPhone) and reads the answer aloud.
-// The reply is Yemot's API text format: parts separated by '.', 't-' = text to speech.
+// The reply is Yemot's API text format, one line: parts start with 't-' (text to speech) and are
+// separated by '.', commands by '&'; so the spoken text itself may not hold . - ' " & = or commas.
+const yemotSay = parts => parts.map(p => 't-' + String(p).replace(/[.,&=\-'"\n\r]/g, ' ').replace(/\s+/g, ' ').trim()).join('.');
+const yemotReply = parts => 'id_list_message=' + yemotSay(parts) + '&go_to_folder=hangup';
+
 app.all('/yemot/points', express.urlencoded({ extended: false }), (req, res) => {
   const q = { ...req.query, ...(req.body || {}) };
-  const say = parts => parts.map(p => 't-' + String(p).replace(/[.,&=\-"]/g, ' ').replace(/\s+/g, ' ').trim()).join('.');
   res.type('text/plain; charset=utf-8');
+  if (q.hangup === 'yes') return res.send('');
   try {
-  if (!q.token || q.token !== yemotToken()) return res.status(403).send('id_list_message=' + say(['אין הרשאה']) + '&go_to_folder=/hangup');
-  const phone = normPhone(q.ApiPhone);
-  const student = phone && db.prepare('SELECT * FROM students WHERE active = 1').all()
-    .find(s => s.phone.split(',').map(x => x.trim()).includes(phone));
-  if (!student) {
-    return res.send('id_list_message=' + say(['מספר הטלפון שממנו התקשרת לא רשום במערכת הנקודות', 'לרישום יש לפנות למזכירות']) + '&go_to_folder=/hangup');
-  }
-  const { perStudent, weeks, target } = computeTotals();
-  const st = perStudent.get(student.id) || { total: 0, byWeek: {} };
-  const cur = progressInfo(weeks, target).current;
-  const week = cur ? (st.byWeek[cur.start_date] || 0) : 0;
-  const left = Math.max(0, target - st.total);
-  const parts = [`צברת עד עכשיו ${st.total} נקודות`];
-  if (cur) parts.push(`השבוע צברת ${week} נקודות`);
-  parts.push(left ? `נשארו לך ${left} נקודות כדי להגיע ליעד` : 'כל הכבוד הגעת ליעד');
-  audit(null, 'phone-check', { student: student.id });
-  res.send('id_list_message=' + say(parts) + '&go_to_folder=/hangup');
+    if (!q.token || q.token !== yemotToken()) return res.status(403).send('');
+    const phone = normPhone(q.ApiPhone);
+    const student = phone && db.prepare('SELECT * FROM students WHERE active = 1').all()
+      .find(s => s.phone.split(',').map(normPhone).includes(phone));
+    if (!student) return res.send(yemotReply(['המספר שלך לא רשום במערכת', 'נא לפנות למזכירות']));
+    const { perStudent, weeks, target } = computeTotals();
+    const st = perStudent.get(student.id) || { total: 0, byWeek: {} };
+    const cur = progressInfo(weeks, target).current;
+    const total = Math.round(st.total);
+    const week = Math.round(cur ? (st.byWeek[cur.start_date] || 0) : 0);
+    const left = Math.max(0, Math.round(target - st.total));
+    audit(null, 'phone-check', { student: student.id });
+    res.send(yemotReply([`צברת עד עכשיו ${total} נקודות`, `השבוע צברת ${week} נקודות`,
+      left > 0 ? `נשארו לך ${left} נקודות כדי להגיע ליעד` : 'הגעת ליעד כל הכבוד']));
   } catch (e) {
     console.error('yemot', e);
-    res.send('id_list_message=' + say(['אירעה תקלה', 'נא לנסות שוב מאוחר יותר']) + '&go_to_folder=/hangup');
+    res.send(yemotReply(['אירעה תקלה נא לנסות שוב מאוחר יותר']));
   }
 });
 
@@ -1114,8 +1119,9 @@ app.post('/api/admin/students/import', staff, wrap(req => {
   return { added, new_classes: newGroups, updated, registered, not_found: notFound };
 }));
 
-app.get('/api/admin/yemot', adminOnly, wrap(() => ({ token: yemotToken() })));
+app.get('/api/admin/yemot', adminOnly, wrap(() => ({ token: yemotToken(), from_env: yemotFromEnv() })));
 app.post('/api/admin/yemot/regenerate', adminOnly, wrap(req => {
+  if (yemotFromEnv()) fail(400, 'הקוד מוגדר במשתנה YEMOT_TOKEN ב-Railway. כדי להחליף אותו משנים שם את הערך.');
   db.prepare("DELETE FROM settings WHERE key = 'yemot_token'").run();
   audit(req.user.id, 'settings', 'yemot_token');
   return { token: yemotToken() };
@@ -1343,4 +1349,4 @@ backup();
 setInterval(() => { try { backup(); } catch (e) { console.error('backup failed', e); } }, 6 * 3600 * 1000);
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Listening on http://localhost:${PORT}`));
+app.listen(PORT, '0.0.0.0', () => console.log(`Listening on http://localhost:${PORT}`));

@@ -1037,11 +1037,14 @@ async function adminSettings() {
       <a class="btn secondary" href="/api/admin/backup">הורדת גיבוי</a></div>`);
   const yemotInput = main.querySelector('#yemot');
   const showYemot = t => { yemotInput.value = `${location.origin}/yemot/points?token=${t}`; };
-  api('/api/admin/yemot').then(r => showYemot(r.token));
+  api('/api/admin/yemot').then(r => {
+    showYemot(r.token);
+    if (r.from_env) main.querySelector('#ynew').outerHTML = '<span class="muted small">הקוד מוגדר ב-Railway (YEMOT_TOKEN). להחלפה משנים אותו שם.</span>';
+  });
   main.querySelector('#ycopy').onclick = () => { navigator.clipboard?.writeText(yemotInput.value); yemotInput.select(); toast('הכתובת הועתקה'); };
   main.querySelector('#ynew').onclick = async () => {
     if (!confirm('הכתובת הקודמת תפסיק לעבוד, וצריך יהיה לעדכן אותה בימות המשיח. להמשיך?')) return;
-    showYemot((await api('/api/admin/yemot/regenerate', { body: {} })).token);
+    try { showYemot((await api('/api/admin/yemot/regenerate', { body: {} })).token); } catch (err) { toast(err.message, 5000); }
   };
   main.querySelector('#save').onclick = async () => {
     const body = { program_name: main.querySelector('#name').value, target: main.querySelector('#target').value,
