@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>עמדת נוכחות</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Rubik:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #101633; --panel: #1a2250; --text: #fff; --muted: #aeb6e0; --primary: #5b74ff;
+      --ok: #2fbf84; --gold: #f0b43c; --bad: #ef6464;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; }
+    body {
+      font-family: 'Rubik', system-ui, sans-serif; background: radial-gradient(circle at 70% 10%, #26307a, var(--bg) 60%);
+      color: var(--text); overflow: hidden; user-select: none;
+    }
+    .top { display: flex; align-items: center; gap: 14px; padding: 18px 28px; }
+    .top img { height: 48px; border-radius: 10px; }
+    .top .name { font-size: 22px; font-weight: 600; }
+    .top .clock { margin-inline-start: auto; font-size: 30px; font-weight: 600; font-variant-numeric: tabular-nums; }
+    .top button { background: rgba(255,255,255,.1); color: var(--muted); border: 0; border-radius: 10px; padding: 8px 12px; font: inherit; cursor: pointer; }
+    .stage { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 22px; height: calc(100% - 90px); padding: 0 16px 24px; text-align: center; }
+    .cam { position: relative; width: min(56vh, 92vw); aspect-ratio: 4 / 3; border-radius: 28px; overflow: hidden; background: #000;
+           box-shadow: 0 0 0 6px rgba(255,255,255,.08); transition: box-shadow .2s; }
+    .cam.busy { box-shadow: 0 0 0 6px var(--primary); }
+    .cam.warn { box-shadow: 0 0 0 6px var(--gold); }
+    .cam video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+    .msg { font-size: clamp(26px, 4.5vw, 46px); font-weight: 600; min-height: 1.3em; }
+    .hint { font-size: clamp(18px, 2.4vw, 24px); color: var(--muted); min-height: 1.3em; }
+    .feedback { position: fixed; inset: 0; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 22px;
+                background: radial-gradient(circle at 50% 30%, #1f6b52, #0c2a24 70%); text-align: center; padding: 24px; }
+    .feedback.late { background: radial-gradient(circle at 50% 30%, #7a5a14, #2a1f08 70%); }
+    .feedback.info { background: radial-gradient(circle at 50% 30%, #2c3a8c, #101633 70%); }
+    .feedback.show { display: flex; }
+    .feedback .big { font-size: clamp(36px, 7vw, 76px); font-weight: 700; line-height: 1.2; }
+    .feedback .what { font-size: clamp(22px, 3.4vw, 34px); color: #e6ecff; }
+    .points { display: flex; gap: 18px; flex-wrap: wrap; justify-content: center; }
+    .points div { background: rgba(255,255,255,.1); border-radius: 18px; padding: 14px 26px; min-width: 170px; }
+    .points b { display: block; font-size: clamp(30px, 5vw, 48px); }
+    .points span { color: #d6dcf5; font-size: 18px; }
+    .bar { width: min(560px, 86vw); height: 16px; border-radius: 99px; background: rgba(255,255,255,.15); overflow: hidden; }
+    .bar i { display: block; height: 100%; background: linear-gradient(90deg, var(--gold), #ffe08a); border-radius: 99px; }
+    .tag { font-size: 16px; color: #ffe1a1; }
+    .offline { position: fixed; bottom: 14px; left: 14px; background: var(--bad); padding: 8px 14px; border-radius: 10px; font-size: 15px; display: none; }
+    .offline.show { display: block; }
+    .error { max-width: 640px; font-size: 22px; color: #ffd0d0; line-height: 1.6; }
+  </style>
+</head>
+<body>
+  <div class="top">
+    <img id="logo" hidden alt="">
+    <span class="name" id="program"></span>
+    <span class="clock" id="clock"></span>
+    <button id="fs">מסך מלא</button>
+  </div>
+  <div class="stage" id="stage">
+    <div class="cam" id="cam"><video id="video"></video></div>
+    <div class="msg" id="msg">טוען...</div>
+    <div class="hint" id="hint"></div>
+  </div>
+  <div class="feedback" id="feedback"></div>
+  <div class="offline" id="offline"></div>
+  <script type="module" src="/kiosk.js"></script>
+</body>
+</html>
