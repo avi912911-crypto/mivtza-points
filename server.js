@@ -248,12 +248,18 @@ function yemotToken() {
 const yemotSay = parts => parts.map(p => 't-' + String(p).replace(/[.,&=\-'"\n\r]/g, ' ').replace(/\s+/g, ' ').trim()).join('.');
 const yemotReply = parts => 'id_list_message=' + yemotSay(parts) + '&go_to_folder=hangup';
 
-app.all('/yemot/points', express.urlencoded({ extended: false }), (req, res) => {
-  const q = { ...req.query, ...(req.body || {}) };
+// The secret can also sit in the path (/yemot/points/<token>), in case Yemot drops or reuses a
+// 'token' query parameter of its own.
+app.all(['/yemot/points', '/yemot/points/:token'], express.urlencoded({ extended: false }), (req, res) => {
+  const q = { ...req.body, ...req.query };
+  const token = req.params.token || q.token;
   res.type('text/plain; charset=utf-8');
   if (q.hangup === 'yes') return res.send('');
   try {
-    if (!q.token || q.token !== yemotToken()) return res.status(403).send('');
+    if (!token || token !== yemotToken()) {
+      audit(null, 'phone-denied', { method: req.method, params: Object.keys(q).join(','), token_len: String(token || '').length });
+      return res.status(403).send('');
+    }
     const phone = normPhone(q.ApiPhone);
     const student = phone && db.prepare('SELECT * FROM students WHERE active = 1').all()
       .find(s => s.phone.split(',').map(normPhone).includes(phone));

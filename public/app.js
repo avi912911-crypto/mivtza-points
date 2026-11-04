@@ -973,7 +973,7 @@ async function adminSettings() {
     <div class="card"><h2>גיבוי</h2><p class="muted">המערכת שומרת גיבוי אוטומטי כל יום (14 הימים האחרונים). אפשר גם להוריד עותק למחשב.</p>
       <a class="btn secondary" href="/api/admin/backup">הורדת גיבוי</a></div>`);
   const yemotInput = main.querySelector('#yemot');
-  const showYemot = t => { yemotInput.value = `${location.origin}/yemot/points?token=${t}`; };
+  const showYemot = t => { yemotInput.value = `${location.origin}/yemot/points/${t}`; };
   api('/api/admin/yemot').then(r => {
     showYemot(r.token);
     if (r.from_env) main.querySelector('#ynew').outerHTML = '<span class="muted small">הקוד מוגדר ב-Railway (YEMOT_TOKEN). להחלפה משנים אותו שם.</span>';
@@ -1017,7 +1017,7 @@ async function adminSettings() {
 
 async function adminLog() {
   const { rows } = await api('/api/admin/audit');
-  const ACT = { entry: 'הזנת נקודות', 'login-failed': 'כניסה שנכשלה', 'entry-move': 'העברת הזנה לשבוע אחר', 'phone-check': 'בדיקת נקודות בטלפון', bonus: 'נקודות מיוחדות', 'bonus-delete': 'מחיקת נקודות מיוחדות', 'user-create': 'משתמש חדש',
+  const ACT = { entry: 'הזנת נקודות', 'login-failed': 'כניסה שנכשלה', 'entry-move': 'העברת הזנה לשבוע אחר', 'phone-check': 'בדיקת נקודות בטלפון', 'phone-denied': 'קו טלפון: קוד שגוי', bonus: 'נקודות מיוחדות', 'bonus-delete': 'מחיקת נקודות מיוחדות', 'user-create': 'משתמש חדש',
     'user-update': 'עדכון משתמש', 'class-create': 'קבוצה חדשה', 'class-update': 'עדכון קבוצה', 'class-delete': 'מחיקת קבוצה',
     'student-create': 'תלמיד חדש', 'student-update': 'עדכון תלמיד', 'student-import': 'ייבוא תלמידים', 'item-create': 'סעיף חדש',
     'item-update': 'עדכון סעיף', settings: 'הגדרות', 'weeks-generate': 'יצירת שבועות', 'week-update': 'עדכון שבוע', 'day-off': 'יום ללא לימודים' };
